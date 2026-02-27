@@ -1,0 +1,87 @@
+# -----------------------------
+# OS / Editor
+# -----------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# Python / Django
+# -----------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.py,cover
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Django local artifacts
+db.sqlite3
+backend/db.sqlite3
+backend/media/
+backend/media/hls/
+backend/staticfiles/
+
+# Migrations cache compiled files
+backend/**/__pycache__/
+backend/**/migrations/__pycache__/
+
+# -----------------------------
+# Node / Next.js
+# -----------------------------
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.eslintcache
+frontend/coverage/
+
+# -----------------------------
+# Environment / secrets
+# -----------------------------
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env.local
+frontend/.env.local.*
+!frontend/.env.local.example
+
+# -----------------------------
+# Build artifacts / archives
+# -----------------------------
+dist/
+build/
+*.tgz
+*.zip
+
+# -----------------------------
+# Local planning / run notes
+# -----------------------------
+RUN_LOCAL.md
+merxylab.md
+instruction.md
+
+# -----------------------------
+# Logs
+# -----------------------------
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
