@@ -3,7 +3,8 @@ from django.contrib.auth.models import Group
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
-from core.models import Course, Lesson, Quiz, QuizChoice, QuizQuestion, Section
+from core.models import Course, Lesson
+from core.mongo_store import set_quiz_payload
 
 
 class Command(BaseCommand):
@@ -43,17 +44,12 @@ class Command(BaseCommand):
             },
         )
 
-        section, _ = Section.objects.get_or_create(
-            course=course,
-            order=1,
-            defaults={"title": "Getting Started"},
-        )
-
         lesson1, _ = Lesson.objects.get_or_create(
-            section=section,
+            course=course,
+            section_order=1,
             order=1,
             defaults={
-                "course": course,
+                "section_title": "Getting Started",
                 "title": "Welcome and Setup",
                 "is_preview": True,
                 "hls_master_path": "media/hls/python-basics/lesson-1/master.m3u8",
@@ -62,10 +58,11 @@ class Command(BaseCommand):
         )
 
         lesson2, _ = Lesson.objects.get_or_create(
-            section=section,
+            course=course,
+            section_order=1,
             order=2,
             defaults={
-                "course": course,
+                "section_title": "Getting Started",
                 "title": "Variables and Data Types",
                 "is_preview": False,
                 "hls_master_path": "media/hls/python-basics/lesson-2/master.m3u8",
@@ -73,15 +70,24 @@ class Command(BaseCommand):
             },
         )
 
-        quiz, _ = Quiz.objects.get_or_create(lesson=lesson2, defaults={"passing_score": 70})
-        question, _ = QuizQuestion.objects.get_or_create(
-            quiz=quiz,
-            order=1,
-            defaults={"prompt": "Which type stores whole numbers?", "type": QuizQuestion.Type.MCQ},
-        )
-        QuizChoice.objects.get_or_create(question=question, text="int", defaults={"is_correct": True})
-        QuizChoice.objects.get_or_create(question=question, text="str", defaults={"is_correct": False})
-        QuizChoice.objects.get_or_create(question=question, text="list", defaults={"is_correct": False})
+        quiz_payload = {
+            "passing_score": 70,
+            "time_limit_sec": None,
+            "questions": [
+                {
+                    "id": 1,
+                    "prompt": "Which type stores whole numbers?",
+                    "type": "MCQ",
+                    "order": 1,
+                    "choices": [
+                        {"id": 1, "text": "int", "is_correct": True},
+                        {"id": 2, "text": "str", "is_correct": False},
+                        {"id": 3, "text": "list", "is_correct": False},
+                    ],
+                }
+            ],
+        }
+        set_quiz_payload(lesson2, quiz_payload)
 
         self.stdout.write(self.style.SUCCESS("Seed completed."))
         self.stdout.write("Admin user: admin / admin12345")

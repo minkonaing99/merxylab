@@ -21,22 +21,17 @@ from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
 
 from core.models import (
     ActiveStreamSession,
     Course,
     Enrollment,
     Lesson,
-    Quiz,
     QuizAttempt,
-    QuizAttemptAnswer,
-    QuizChoice,
-    QuizQuestion,
-    Section,
     UserLessonProgress,
 )
 from core.permissions import IsAdminRole
+from core.mongo_store import delete_quiz_payload, get_quiz_map, get_quiz_payload, set_quiz_payload
 from core.serializers import (
     AdminCourseCreateSerializer,
     AdminCourseUpdateSerializer,
@@ -53,7 +48,6 @@ from core.serializers import (
     LessonAccessSerializer,
     LessonDetailSerializer,
     QuizAttemptSerializer,
-    QuizPublicSerializer,
     QuizSubmitSerializer,
     StreamAccessSerializer,
     StreamHeartbeatSerializer,
@@ -111,8 +105,7 @@ def _can_access_lesson(user, lesson):
 def _ordered_course_lessons(course):
     return list(
         Lesson.objects.filter(course=course)
-        .select_related("section")
-        .order_by("section__order", "order", "id")
+        .order_by("section_order", "order", "id")
     )
 
 
@@ -138,10 +131,11 @@ def _unlocked_lesson_ids(user, course):
         QuizAttempt.objects.filter(
             user=user,
             passed=True,
-            quiz__lesson__course=course,
-        ).values_list("quiz__lesson_id", flat=True)
+            lesson__course=course,
+        ).values_list("lesson_id", flat=True)
     )
-    quiz_lesson_ids = set(Quiz.objects.filter(lesson__course=course).values_list("lesson_id", flat=True))
+    quiz_map = get_quiz_map(lessons)
+    quiz_lesson_ids = set(quiz_map.keys())
 
     for idx, lesson in enumerate(lessons):
         if lesson.is_preview:
@@ -313,16 +307,7 @@ def me(request):
 def logout(request):
     serializer = LogoutSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-
-    try:
-        token = RefreshToken(serializer.validated_data["refresh"])
-        token.blacklist()
-    except Exception:
-        return Response(
-            {"detail": "Invalid refresh token."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
+    # Stateless JWT logout: client should discard access/refresh tokens.
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -337,7 +322,7 @@ def course_list(_request):
 @permission_classes([AllowAny])
 def course_detail(request, course_slug):
     course = get_object_or_404(
-        Course.objects.prefetch_related("sections__lessons"),
+        Course.objects.prefetch_related("lessons"),
         slug=course_slug,
         is_published=True,
     )
@@ -358,7 +343,7 @@ def course_lessons(request, course_id):
     course = get_object_or_404(Course, id=course_id, is_published=True)
     is_enrolled = _is_enrolled(request.user, course)
     unlocked_ids = _unlocked_lesson_ids(request.user, course)
-    lessons = Lesson.objects.filter(course=course).select_related("section").order_by("section__order", "order", "id")
+    lessons = Lesson.objects.filter(course=course).order_by("section_order", "order", "id")
     serializer = LessonAccessSerializer(lessons, many=True, context={"is_enrolled": is_enrolled, "unlocked_lesson_ids": unlocked_ids})
     return Response(
         {
@@ -429,7 +414,7 @@ def admin_courses(request):
 def admin_lessons(request):
     if request.method == "GET":
         course_id = request.query_params.get("course_id")
-        lessons = Lesson.objects.select_related("course", "section").all().order_by("course_id", "section_id", "order", "id")
+        lessons = Lesson.objects.select_related("course").all().order_by("course_id", "section_order", "order", "id")
         if course_id:
             lessons = lessons.filter(course_id=course_id)
         payload = [
@@ -437,8 +422,8 @@ def admin_lessons(request):
                 "id": lesson.id,
                 "course_id": lesson.course_id,
                 "course_title": lesson.course.title,
-                "section_id": lesson.section_id,
-                "section_title": lesson.section.title,
+                "section_id": lesson.section_order,
+                "section_title": lesson.section_title,
                 "title": lesson.title,
                 "order": lesson.order,
                 "content_type": lesson.content_type,
@@ -456,22 +441,24 @@ def admin_lessons(request):
     data = serializer.validated_data
 
     course = get_object_or_404(Course, id=data["course_id"])
-    section_id = data.get("section_id")
-    if section_id:
-        section = get_object_or_404(Section, id=section_id, course=course)
-    else:
-        section, _ = Section.objects.get_or_create(
-            course=course,
-            order=data["section_order"],
-            defaults={"title": data["section_title"]},
+    if data.get("section_id"):
+        existing = (
+            Lesson.objects.filter(course=course, section_order=data["section_id"])
+            .order_by("id")
+            .first()
         )
-        if section.title != data["section_title"]:
-            section.title = data["section_title"]
-            section.save(update_fields=["title", "updated_at"])
+        if existing is None:
+            return Response({"detail": "Section not found."}, status=status.HTTP_404_NOT_FOUND)
+        section_order = existing.section_order
+        section_title = existing.section_title
+    else:
+        section_order = data["section_order"]
+        section_title = data["section_title"]
 
     lesson = Lesson.objects.create(
         course=course,
-        section=section,
+        section_title=section_title,
+        section_order=section_order,
         title=data["title"],
         order=data["order"],
         content_type=data.get("content_type", Lesson.ContentType.VIDEO),
@@ -487,19 +474,23 @@ def admin_lessons(request):
 @permission_classes([IsAuthenticated, IsAdminRole])
 def admin_quizzes(request):
     if request.method == "GET":
-        quizzes = Quiz.objects.select_related("lesson", "lesson__course").prefetch_related("questions__choices").all().order_by("id")
+        lessons = list(Lesson.objects.select_related("course").order_by("id"))
+        quiz_map = get_quiz_map(lessons)
         payload = []
-        for quiz in quizzes:
+        for lesson in lessons:
+            quiz = quiz_map.get(lesson.id)
+            if not quiz:
+                continue
             payload.append(
                 {
-                    "id": quiz.id,
-                    "lesson_id": quiz.lesson_id,
-                    "lesson_title": quiz.lesson.title,
-                    "course_id": quiz.lesson.course_id,
-                    "course_title": quiz.lesson.course.title,
-                    "passing_score": quiz.passing_score,
-                    "time_limit_sec": quiz.time_limit_sec,
-                    "questions_count": quiz.questions.count(),
+                    "id": lesson.id,
+                    "lesson_id": lesson.id,
+                    "lesson_title": lesson.title,
+                    "course_id": lesson.course_id,
+                    "course_title": lesson.course.title,
+                    "passing_score": quiz.get("passing_score", 70),
+                    "time_limit_sec": quiz.get("time_limit_sec"),
+                    "questions_count": len(quiz.get("questions", [])),
                 }
             )
         return Response(payload)
@@ -509,34 +500,61 @@ def admin_quizzes(request):
     data = serializer.validated_data
 
     lesson = get_object_or_404(Lesson, id=data["lesson_id"])
-    if hasattr(lesson, "quiz"):
+    existing = get_quiz_payload(lesson)
+    if existing.get("questions"):
         return Response({"detail": "Quiz already exists for this lesson."}, status=status.HTTP_400_BAD_REQUEST)
 
-    with transaction.atomic():
-        quiz = Quiz.objects.create(
-            lesson=lesson,
-            passing_score=data.get("passing_score", 70),
-            time_limit_sec=data.get("time_limit_sec"),
+    question_id_seq = 1
+    choice_id_seq = 1
+    questions = []
+    for question_item in data["questions"]:
+        choices = []
+        for choice in question_item["choices"]:
+            choices.append(
+                {
+                    "id": choice_id_seq,
+                    "text": choice["text"],
+                    "is_correct": bool(choice.get("is_correct", False)),
+                }
+            )
+            choice_id_seq += 1
+        questions.append(
+            {
+                "id": question_id_seq,
+                "prompt": question_item["prompt"],
+                "type": question_item.get("type", "MCQ"),
+                "order": question_item["order"],
+                "choices": choices,
+            }
         )
-        for question_item in data["questions"]:
-            question = QuizQuestion.objects.create(
-                quiz=quiz,
-                prompt=question_item["prompt"],
-                type=question_item.get("type", QuizQuestion.Type.MCQ),
-                order=question_item["order"],
-            )
-            QuizChoice.objects.bulk_create(
-                [
-                    QuizChoice(
-                        question=question,
-                        text=choice["text"],
-                        is_correct=choice.get("is_correct", False),
-                    )
-                    for choice in question_item["choices"]
-                ]
-            )
+        question_id_seq += 1
 
-    return Response(QuizPublicSerializer(quiz).data, status=status.HTTP_201_CREATED)
+    payload = {
+        "passing_score": data.get("passing_score", 70),
+        "time_limit_sec": data.get("time_limit_sec"),
+        "questions": questions,
+    }
+    set_quiz_payload(lesson, payload)
+
+    return Response(
+        {
+            "id": lesson.id,
+            "lesson_id": lesson.id,
+            "passing_score": payload["passing_score"],
+            "time_limit_sec": payload.get("time_limit_sec"),
+            "questions": [
+                {
+                    "id": q["id"],
+                    "prompt": q["prompt"],
+                    "type": q["type"],
+                    "order": q["order"],
+                    "choices": [{"id": c["id"], "text": c["text"]} for c in q.get("choices", [])],
+                }
+                for q in payload.get("questions", [])
+            ],
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 
 @api_view(["POST"])
@@ -647,10 +665,26 @@ def admin_upload_video(request):
 @permission_classes([IsAuthenticated, IsAdminRole])
 def admin_sections(request):
     course_id = request.query_params.get("course_id")
-    sections = Section.objects.all().order_by("course_id", "order", "id")
+    lessons = Lesson.objects.all().order_by("course_id", "section_order", "id")
     if course_id:
-        sections = sections.filter(course_id=course_id)
-    return Response(AdminSectionSerializer(sections, many=True).data)
+        lessons = lessons.filter(course_id=course_id)
+
+    seen = set()
+    payload = []
+    for lesson in lessons:
+        key = (lesson.course_id, lesson.section_order)
+        if key in seen:
+            continue
+        seen.add(key)
+        payload.append(
+            {
+                "id": lesson.section_order,
+                "course_id": lesson.course_id,
+                "title": lesson.section_title,
+                "order": lesson.section_order,
+            }
+        )
+    return Response(AdminSectionSerializer(payload, many=True).data)
 
 
 @api_view(["PATCH", "DELETE"])
@@ -686,21 +720,26 @@ def admin_lesson_detail(request, lesson_id):
 @api_view(["PATCH", "DELETE"])
 @permission_classes([IsAuthenticated, IsAdminRole])
 def admin_quiz_detail(request, quiz_id):
-    quiz = get_object_or_404(Quiz, id=quiz_id)
+    lesson = get_object_or_404(Lesson, id=quiz_id)
 
     if request.method == "DELETE":
-        quiz.delete()
+        delete_quiz_payload(lesson)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    serializer = AdminQuizUpdateSerializer(quiz, data=request.data, partial=True)
+    serializer = AdminQuizUpdateSerializer(data=request.data, partial=True)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    payload = get_quiz_payload(lesson)
+    if "passing_score" in serializer.validated_data:
+        payload["passing_score"] = serializer.validated_data["passing_score"]
+    if "time_limit_sec" in serializer.validated_data:
+        payload["time_limit_sec"] = serializer.validated_data["time_limit_sec"]
+    set_quiz_payload(lesson, payload)
     return Response(
         {
-            "id": quiz.id,
-            "lesson_id": quiz.lesson_id,
-            "passing_score": int(quiz.passing_score),
-            "time_limit_sec": quiz.time_limit_sec,
+            "id": lesson.id,
+            "lesson_id": lesson.id,
+            "passing_score": int(payload.get("passing_score", 70)),
+            "time_limit_sec": payload.get("time_limit_sec"),
         }
     )
 
@@ -747,16 +786,21 @@ def admin_insights(request):
 
     enrollment_rows = Enrollment.objects.values("course_id").annotate(count=Count("id"))
     lesson_rows = Lesson.objects.values("course_id").annotate(count=Count("id"))
-    quiz_rows = Quiz.objects.values("lesson__course_id").annotate(count=Count("id"))
-    attempt_rows = QuizAttempt.objects.values("quiz__lesson__course_id").annotate(
+    lessons = list(Lesson.objects.all().only("id", "course_id", "quiz_payload"))
+    quiz_map = get_quiz_map(lessons)
+    quiz_count_by_course = {}
+    for lesson in lessons:
+        if lesson.id in quiz_map:
+            quiz_count_by_course[lesson.course_id] = quiz_count_by_course.get(lesson.course_id, 0) + 1
+    attempt_rows = QuizAttempt.objects.values("lesson__course_id").annotate(
         attempts=Count("id"),
         passes=Count("id", filter=Q(passed=True)),
     )
 
     enrollment_map = {row["course_id"]: row["count"] for row in enrollment_rows}
     lesson_map = {row["course_id"]: row["count"] for row in lesson_rows}
-    quiz_map = {row["lesson__course_id"]: row["count"] for row in quiz_rows}
-    attempt_map = {row["quiz__lesson__course_id"]: row for row in attempt_rows}
+    quiz_map = quiz_count_by_course
+    attempt_map = {row["lesson__course_id"]: row for row in attempt_rows}
 
     course_payload = []
     for course in courses:
@@ -791,7 +835,7 @@ def admin_insights(request):
                 "students": Enrollment.objects.values("user_id").distinct().count(),
                 "enrollments": Enrollment.objects.count(),
                 "lessons": Lesson.objects.count(),
-                "quizzes": Quiz.objects.count(),
+                "quizzes": sum(quiz_count_by_course.values()),
                 "quiz_attempts": total_attempts,
                 "quiz_passes": total_passes,
                 "pass_rate": total_pass_rate,
@@ -805,7 +849,7 @@ def admin_insights(request):
 @permission_classes([AllowAny])
 def lesson_detail(request, lesson_id):
     lesson = get_object_or_404(
-        Lesson.objects.select_related("course", "section", "quiz"),
+        Lesson.objects.select_related("course"),
         id=lesson_id,
         course__is_published=True,
     )
@@ -814,7 +858,8 @@ def lesson_detail(request, lesson_id):
             {"detail": _lesson_access_denial_message(request.user, lesson)},
             status=status.HTTP_403_FORBIDDEN,
         )
-    return Response(LessonDetailSerializer(lesson).data)
+    has_quiz = bool(get_quiz_payload(lesson).get("questions"))
+    return Response(LessonDetailSerializer(lesson, context={"has_quiz": has_quiz}).data)
 
 
 @api_view(["GET", "POST"])
@@ -1084,7 +1129,7 @@ def stream_hls_asset(request, lesson_id, asset_name):
 @permission_classes([IsAuthenticated])
 def lesson_quiz(request, lesson_id):
     lesson = get_object_or_404(
-        Lesson.objects.select_related("course").prefetch_related("quiz__questions__choices"),
+        Lesson.objects.select_related("course"),
         id=lesson_id,
         course__is_published=True,
     )
@@ -1099,28 +1144,51 @@ def lesson_quiz(request, lesson_id):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    quiz = getattr(lesson, "quiz", None)
-    if quiz is None:
+    quiz = get_quiz_payload(lesson)
+    questions = quiz.get("questions", [])
+    if not questions:
         return Response({"detail": "Quiz not found for this lesson."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(QuizPublicSerializer(quiz).data)
+    return Response(
+        {
+            "id": lesson.id,
+            "lesson_id": lesson.id,
+            "passing_score": quiz.get("passing_score", 70),
+            "time_limit_sec": quiz.get("time_limit_sec"),
+            "questions": [
+                {
+                    "id": q["id"],
+                    "prompt": q["prompt"],
+                    "type": q.get("type", "MCQ"),
+                    "order": q.get("order", idx + 1),
+                    "choices": [{"id": c["id"], "text": c["text"]} for c in q.get("choices", [])],
+                }
+                for idx, q in enumerate(questions)
+            ],
+        }
+    )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quiz_submit(request, quiz_id):
-    quiz = get_object_or_404(
-        Quiz.objects.select_related("lesson__course").prefetch_related("questions__choices"),
+    lesson = get_object_or_404(
+        Lesson.objects.select_related("course"),
         id=quiz_id,
-        lesson__course__is_published=True,
+        course__is_published=True,
     )
-    if not _is_enrolled(request.user, quiz.lesson.course):
+    quiz = get_quiz_payload(lesson)
+    questions = quiz.get("questions", [])
+    if not questions:
+        return Response({"detail": "Quiz not found for this lesson."}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _is_enrolled(request.user, lesson.course):
         return Response(
             {"detail": "Enrollment required for quizzes."},
             status=status.HTTP_403_FORBIDDEN,
         )
-    if not _can_access_lesson(request.user, quiz.lesson):
+    if not _can_access_lesson(request.user, lesson):
         return Response(
-            {"detail": _lesson_access_denial_message(request.user, quiz.lesson)},
+            {"detail": _lesson_access_denial_message(request.user, lesson)},
             status=status.HTTP_403_FORBIDDEN,
         )
 
@@ -1131,7 +1199,7 @@ def quiz_submit(request, quiz_id):
     failed_today = (
         QuizAttempt.objects.filter(
             user=request.user,
-            quiz=quiz,
+            lesson=lesson,
             passed=False,
             attempted_at__gte=today_start,
         )
@@ -1153,11 +1221,7 @@ def quiz_submit(request, quiz_id):
     serializer.is_valid(raise_exception=True)
     submitted_answers = serializer.validated_data["answers"]
 
-    questions = list(quiz.questions.all().order_by("order", "id"))
-    if not questions:
-        return Response({"detail": "Quiz has no questions configured."}, status=status.HTTP_400_BAD_REQUEST)
-
-    question_map = {q.id: q for q in questions}
+    question_map = {int(q["id"]): q for q in questions}
     seen_questions = set()
     normalized_answers = []
     correct_count = 0
@@ -1172,47 +1236,41 @@ def quiz_submit(request, quiz_id):
             )
         seen_questions.add(qid)
 
-        question = question_map.get(qid)
+        question = question_map.get(int(qid))
         if question is None:
             return Response(
                 {"detail": f"Question {qid} is not part of this quiz."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            choice = QuizChoice.objects.get(id=cid, question_id=qid)
-        except QuizChoice.DoesNotExist:
+        choice = next((c for c in question.get("choices", []) if int(c["id"]) == int(cid)), None)
+        if choice is None:
             return Response(
                 {"detail": f"Choice {cid} is invalid for question {qid}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if choice.is_correct:
+        if choice.get("is_correct"):
             correct_count += 1
-        normalized_answers.append((qid, cid))
+        normalized_answers.append({"question_id": int(qid), "choice_id": int(cid)})
 
     total_questions = len(questions)
     score = round((correct_count / total_questions) * 100, 2)
-    passed = score >= float(quiz.passing_score)
+    passed = score >= float(quiz.get("passing_score", 70))
 
     with transaction.atomic():
         attempt = QuizAttempt.objects.create(
             user=request.user,
-            quiz=quiz,
+            lesson=lesson,
             score=score,
             passed=passed,
-        )
-        QuizAttemptAnswer.objects.bulk_create(
-            [
-                QuizAttemptAnswer(attempt=attempt, question_id=qid, choice_id=cid)
-                for qid, cid in normalized_answers
-            ]
+            answers_payload=normalized_answers,
         )
         if passed:
             # A passed quiz marks the lesson as completed for progression unlock.
             progress, _ = UserLessonProgress.objects.get_or_create(
                 user=request.user,
-                lesson=quiz.lesson,
+                lesson=lesson,
                 defaults={"last_position_seconds": 0, "completed": True},
             )
             if not progress.completed:
@@ -1224,7 +1282,7 @@ def quiz_submit(request, quiz_id):
         "total_questions": total_questions,
         "answered_questions": len(normalized_answers),
         "correct_answers": correct_count,
-        "passing_score": int(quiz.passing_score),
+        "passing_score": int(quiz.get("passing_score", 70)),
     }
     return Response(response_payload, status=status.HTTP_201_CREATED)
 
@@ -1232,15 +1290,14 @@ def quiz_submit(request, quiz_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def quiz_attempts(request, quiz_id):
-    quiz = get_object_or_404(Quiz.objects.select_related("lesson__course"), id=quiz_id, lesson__course__is_published=True)
-    if not _is_enrolled(request.user, quiz.lesson.course):
+    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=quiz_id, course__is_published=True)
+    if not _is_enrolled(request.user, lesson.course):
         return Response(
             {"detail": "Enrollment required for quizzes."},
             status=status.HTTP_403_FORBIDDEN,
         )
     attempts = (
-        QuizAttempt.objects.filter(user=request.user, quiz=quiz)
-        .prefetch_related("answers")
+        QuizAttempt.objects.filter(user=request.user, lesson=lesson)
         .order_by("-attempted_at")
     )
     return Response(QuizAttemptSerializer(attempts, many=True).data)

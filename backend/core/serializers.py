@@ -1,21 +1,11 @@
 from rest_framework import serializers
 
-from core.models import (
-    Course,
-    Enrollment,
-    Lesson,
-    Quiz,
-    QuizAttempt,
-    QuizAttemptAnswer,
-    QuizChoice,
-    QuizQuestion,
-    Section,
-    UserLessonProgress,
-)
+from core.models import Course, Enrollment, Lesson, QuizAttempt, UserLessonProgress
 
 
 class LessonAccessSerializer(serializers.ModelSerializer):
     locked = serializers.SerializerMethodField()
+    section_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
@@ -38,24 +28,8 @@ class LessonAccessSerializer(serializers.ModelSerializer):
         unlocked_ids = self.context.get("unlocked_lesson_ids", set())
         return obj.id not in unlocked_ids
 
-
-class SectionWithLessonsSerializer(serializers.ModelSerializer):
-    lessons = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Section
-        fields = ["id", "course_id", "title", "order", "lessons"]
-
-    def get_lessons(self, obj):
-        lessons = obj.lessons.all().order_by("order", "id")
-        return LessonAccessSerializer(
-            lessons,
-            many=True,
-            context={
-                "is_enrolled": self.context.get("is_enrolled", False),
-                "unlocked_lesson_ids": self.context.get("unlocked_lesson_ids", set()),
-            },
-        ).data
+    def get_section_id(self, obj):
+        return obj.section_order
 
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -80,15 +54,32 @@ class CourseDetailSerializer(CourseListSerializer):
         fields = CourseListSerializer.Meta.fields + ["sections"]
 
     def get_sections(self, obj):
-        sections = obj.sections.all().order_by("order", "id")
-        return SectionWithLessonsSerializer(
-            sections,
-            many=True,
-            context={
-                "is_enrolled": self.context.get("is_enrolled", False),
-                "unlocked_lesson_ids": self.context.get("unlocked_lesson_ids", set()),
-            },
-        ).data
+        lessons = list(
+            obj.lessons.all().order_by("section_order", "order", "id")
+        )
+        unlocked_ids = self.context.get("unlocked_lesson_ids", set())
+
+        grouped = {}
+        for lesson in lessons:
+            key = lesson.section_order
+            grouped.setdefault(
+                key,
+                {
+                    "id": key,
+                    "course_id": obj.id,
+                    "title": lesson.section_title,
+                    "order": lesson.section_order,
+                    "lessons": [],
+                },
+            )
+            grouped[key]["lessons"].append(
+                LessonAccessSerializer(
+                    lesson,
+                    context={"unlocked_lesson_ids": unlocked_ids},
+                ).data
+            )
+
+        return [grouped[key] for key in sorted(grouped.keys())]
 
 
 class EnrollmentSerializer(serializers.ModelSerializer):
@@ -109,6 +100,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 
 class LessonDetailSerializer(serializers.ModelSerializer):
     has_quiz = serializers.SerializerMethodField()
+    section_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
@@ -127,7 +119,12 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_has_quiz(self, obj):
-        return hasattr(obj, "quiz")
+        if "has_quiz" in self.context:
+            return bool(self.context["has_quiz"])
+        return bool(obj.quiz_payload and obj.quiz_payload.get("questions"))
+
+    def get_section_id(self, obj):
+        return obj.section_order
 
 
 class UserLessonProgressSerializer(serializers.ModelSerializer):
@@ -156,28 +153,6 @@ class StreamHeartbeatSerializer(serializers.Serializer):
     lesson_id = serializers.IntegerField(min_value=1)
 
 
-class QuizChoicePublicSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = QuizChoice
-        fields = ["id", "text"]
-
-
-class QuizQuestionPublicSerializer(serializers.ModelSerializer):
-    choices = QuizChoicePublicSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = QuizQuestion
-        fields = ["id", "prompt", "type", "order", "choices"]
-
-
-class QuizPublicSerializer(serializers.ModelSerializer):
-    questions = QuizQuestionPublicSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Quiz
-        fields = ["id", "lesson_id", "passing_score", "time_limit_sec", "questions"]
-
-
 class QuizSubmitAnswerSerializer(serializers.Serializer):
     question_id = serializers.IntegerField(min_value=1)
     choice_id = serializers.IntegerField(min_value=1)
@@ -187,24 +162,26 @@ class QuizSubmitSerializer(serializers.Serializer):
     answers = QuizSubmitAnswerSerializer(many=True, allow_empty=False)
 
 
-class QuizAttemptAnswerSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = QuizAttemptAnswer
-        fields = ["question_id", "choice_id"]
-
-
 class QuizAttemptSerializer(serializers.ModelSerializer):
-    answers = QuizAttemptAnswerSerializer(many=True, read_only=True)
+    quiz_id = serializers.SerializerMethodField()
+    answers = serializers.SerializerMethodField()
 
     class Meta:
         model = QuizAttempt
         fields = ["id", "quiz_id", "attempted_at", "score", "passed", "answers"]
 
+    def get_quiz_id(self, obj):
+        return obj.lesson_id
 
-class AdminSectionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Section
-        fields = ["id", "course_id", "title", "order"]
+    def get_answers(self, obj):
+        return obj.answers_payload or []
+
+
+class AdminSectionSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    course_id = serializers.IntegerField()
+    title = serializers.CharField()
+    order = serializers.IntegerField()
 
 
 class AdminCourseCreateSerializer(serializers.ModelSerializer):
@@ -264,7 +241,7 @@ class AdminQuizChoiceInputSerializer(serializers.Serializer):
 
 class AdminQuizQuestionInputSerializer(serializers.Serializer):
     prompt = serializers.CharField()
-    type = serializers.ChoiceField(choices=QuizQuestion.Type.choices, default=QuizQuestion.Type.MCQ)
+    type = serializers.ChoiceField(choices=[("MCQ", "Multiple Choice")], default="MCQ")
     order = serializers.IntegerField(min_value=1)
     choices = AdminQuizChoiceInputSerializer(many=True, allow_empty=False)
 
@@ -306,10 +283,6 @@ class AdminLessonUpdateSerializer(serializers.ModelSerializer):
         ]
 
 
-class AdminQuizUpdateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Quiz
-        fields = [
-            "passing_score",
-            "time_limit_sec",
-        ]
+class AdminQuizUpdateSerializer(serializers.Serializer):
+    passing_score = serializers.IntegerField(min_value=0, max_value=100, required=False)
+    time_limit_sec = serializers.IntegerField(min_value=1, required=False, allow_null=True)
