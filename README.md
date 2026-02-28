@@ -44,25 +44,6 @@ It supports role-based access (`admin`, `student`), course enrollment, lesson pr
 - Quiz definitions are stored in MongoDB collection: `lesson_quizzes`.
 - When Mongo is enabled, SQL `quiz_payload` is cleared to avoid duplicate source-of-truth data.
 
-## Local Start
-
-Backend:
-
-```powershell
-.\.venv\Scripts\python backend\manage.py migrate
-.\.venv\Scripts\python backend\manage.py seed_mvp
-.\.venv\Scripts\python backend\manage.py sync_quiz_to_mongo
-.\.venv\Scripts\python backend\manage.py runserver 8000
-```
-
-Frontend:
-
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
 ## Notes
 
 - This repository includes application code only.
