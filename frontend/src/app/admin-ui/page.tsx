@@ -1251,7 +1251,19 @@ export default function AdminUiPage() {
                 </option>
               ))}
             </select>
-            <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
+            <input
+              type="number"
+              min={0}
+              className="mt-2 w-full rounded border px-3 py-2"
+              placeholder="Credits"
+              value={courseForm.price_cents}
+              onChange={(e) =>
+                setCourseForm((v) => ({
+                  ...v,
+                  price_cents: e.target.value === "" ? 0 : Number(e.target.value),
+                }))
+              }
+            />
             <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
             <label className="mt-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />

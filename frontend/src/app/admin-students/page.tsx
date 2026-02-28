@@ -208,7 +208,7 @@ export default function AdminStudentsPage() {
                 <p className="mt-2 text-xs muted">No passport photo uploaded.</p>
               )}
             </div>
-            {studentProfile.profile.passport_photo_url ? (
+            {studentProfile.profile.passport_photo_url && studentProfile.profile.verification_status !== "VERIFIED" ? (
               <div className="mt-3 grid gap-2">
                 <input
                   className="input"
@@ -227,7 +227,9 @@ export default function AdminStudentsPage() {
               </div>
             ) : (
               <p className="mt-3 text-xs muted">
-                Approval actions are available after the student uploads a passport photo.
+                {studentProfile.profile.verification_status === "VERIFIED"
+                  ? "Profile is already approved."
+                  : "Approval actions are available after the student uploads a passport photo."}
               </p>
             )}
           </>

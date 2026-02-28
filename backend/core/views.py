@@ -713,6 +713,13 @@ def course_exam_eligibility(request, course_id):
     profile_completed = summary["profile_completed"]
     can_take_final_exam = summary["can_take_final_exam"]
     exam_exists = summary["exam_exists"]
+    latest_attempt = None
+    if summary["exam"] is not None:
+        latest_attempt = (
+            FinalExamAttempt.objects.filter(user=request.user, exam=summary["exam"])
+            .order_by("-attempted_at")
+            .first()
+        )
 
     return Response(
         {
@@ -724,6 +731,15 @@ def course_exam_eligibility(request, course_id):
             "profile_completed": profile_completed,
             "profile_completion_flags": profile_flags,
             "progress": completion,
+            "final_exam_result": (
+                {
+                    "attempted": True,
+                    "passed": bool(latest_attempt.passed),
+                    "score": str(latest_attempt.score),
+                }
+                if latest_attempt
+                else {"attempted": False, "passed": False, "score": None}
+            ),
             "next_step": (
                 "Take final exam."
                 if can_take_final_exam
