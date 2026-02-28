@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
+import { downloadCertificateTemplate } from "@/lib/certificate";
 
 type ProfilePayload = {
   full_name: string;
@@ -104,25 +105,6 @@ export default function ProfilePage() {
       (today.getMonth() === birthDate.getMonth() && today.getDate() >= birthDate.getDate());
     if (!hasHadBirthdayThisYear) age -= 1;
     return age >= 13;
-  };
-
-  const downloadCertificateFile = (courseTitle: string, code?: string, issuedAt?: string) => {
-    const safeCourse = courseTitle.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lines = [
-      "MerxyLab Course Certificate",
-      `Course: ${courseTitle}`,
-      `Certificate Code: ${code || "N/A"}`,
-      `Issued At: ${issuedAt ? new Date(issuedAt).toLocaleString() : "N/A"}`,
-    ];
-    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
-    const href = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = href;
-    anchor.download = `certificate-${safeCourse || "course"}.txt`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(href);
   };
 
   const flagList = useMemo(
@@ -391,7 +373,12 @@ export default function ProfilePage() {
                         type="button"
                         className="btn btn-primary h-9 px-3"
                         onClick={() => {
-                          downloadCertificateFile(row.course_title, row.certificate_code, row.certificate_issued_at);
+                          downloadCertificateTemplate({
+                            courseTitle: row.course_title,
+                            certificateCode: row.certificate_code,
+                            issuedAt: row.certificate_issued_at,
+                            studentName: form.full_name || "Student",
+                          });
                           setNotice("Certificate downloaded.");
                         }}
                       >

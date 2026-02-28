@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAccessToken } from "@/hooks/use-access-token";
 import { getAccessToken } from "@/lib/auth";
+import { downloadCertificateTemplate } from "@/lib/certificate";
 
 type Lesson = {
   id: number;
@@ -44,6 +45,10 @@ type CertificateResponse = {
     issued_at: string;
   };
 };
+type MePayload = {
+  full_name?: string;
+  username: string;
+};
 
 export default function CourseDetailPage() {
   const router = useRouter();
@@ -54,6 +59,7 @@ export default function CourseDetailPage() {
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [examEligibility, setExamEligibility] = useState<ExamEligibility | null>(null);
   const [certificate, setCertificate] = useState<CertificateResponse | null>(null);
+  const [studentName, setStudentName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -78,6 +84,9 @@ export default function CourseDetailPage() {
       return;
     }
     void loadCourse(token);
+    apiFetch<MePayload>("/me/", {}, token)
+      .then((me) => setStudentName((me.full_name || "").trim() || me.username))
+      .catch(() => setStudentName(""));
   }, [accessToken, loadCourse, pathname, router]);
 
   useEffect(() => {
@@ -101,22 +110,12 @@ export default function CourseDetailPage() {
 
   const downloadCertificateFile = () => {
     if (!course || !certificate?.issued) return;
-    const safeCourse = course.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lines = [
-      "MerxyLab Course Certificate",
-      `Course: ${course.title}`,
-      `Certificate Code: ${certificate.certificate?.certificate_code || "N/A"}`,
-      `Issued At: ${certificate.certificate?.issued_at ? new Date(certificate.certificate.issued_at).toLocaleString() : "N/A"}`,
-    ];
-    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
-    const href = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = href;
-    anchor.download = `certificate-${safeCourse || "course"}.txt`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(href);
+    downloadCertificateTemplate({
+      courseTitle: course.title,
+      certificateCode: certificate.certificate?.certificate_code,
+      issuedAt: certificate.certificate?.issued_at,
+      studentName: studentName || "Student",
+    });
   };
 
   const enroll = async () => {
