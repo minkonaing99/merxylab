@@ -3,7 +3,7 @@
 import Hls from "hls.js";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_ORIGIN, apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken, getOrCreateDeviceId } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
@@ -45,20 +45,47 @@ export default function LessonPage() {
   const [nextLessonId, setNextLessonId] = useState<number | null>(null);
   const [status, setStatus] = useState("Loading...");
   const [error, setError] = useState("");
+  const [watchPercent, setWatchPercent] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const deviceIdRef = useRef<string>("");
+  const progressKey = useMemo(() => `lesson-progress-${lessonId}`, [lessonId]);
 
-  const markCompleted = async () => {
-    if (!lesson || !accessToken) return;
-    const currentTime = Math.floor(videoRef.current?.currentTime || 0);
+  const getEffectiveDuration = useCallback(() => {
+    const knownDuration = lesson?.duration_seconds ?? null;
+    const playerDuration =
+      videoRef.current && Number.isFinite(videoRef.current.duration) ? videoRef.current.duration : 0;
+    return knownDuration && knownDuration > 0 ? knownDuration : playerDuration;
+  }, [lesson?.duration_seconds]);
+
+  const persistLocalProgress = useCallback((seconds: number) => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(progressKey, String(Math.max(0, Math.floor(seconds))));
+  }, [progressKey]);
+
+  const syncProgress = useCallback(async (completedOverride?: boolean) => {
+    if (!lesson || !accessToken || !videoRef.current) return;
+    const current = Math.floor(videoRef.current.currentTime || 0);
+    const effectiveDuration = getEffectiveDuration();
+    const completed =
+      typeof completedOverride === "boolean"
+        ? completedOverride
+        : effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95;
+    persistLocalProgress(current);
     await apiFetch(
       `/lessons/${lesson.id}/progress/`,
       {
         method: "POST",
-        body: JSON.stringify({ last_position_seconds: currentTime, completed: true }),
+        body: JSON.stringify({
+          last_position_seconds: current,
+          completed,
+        }),
       },
       accessToken,
     );
+  }, [accessToken, getEffectiveDuration, lesson, persistLocalProgress]);
+
+  const markCompleted = async () => {
+    await syncProgress(true);
   };
 
   useEffect(() => {
@@ -134,7 +161,10 @@ export default function LessonPage() {
         setStream(streamData);
         setStatus("Streaming");
         if (videoRef.current) {
-          videoRef.current.currentTime = progress.last_position_seconds || 0;
+          const localSaved =
+            typeof window !== "undefined" ? Number(window.localStorage.getItem(progressKey) || "0") : 0;
+          const startAt = Math.max(progress.last_position_seconds || 0, Number.isFinite(localSaved) ? localSaved : 0);
+          videoRef.current.currentTime = startAt;
         }
       } catch (err) {
         const message = err instanceof ApiError ? err.message : "Unable to start stream.";
@@ -144,7 +174,7 @@ export default function LessonPage() {
     };
 
     start();
-  }, [lesson, accessToken]);
+  }, [lesson, accessToken, progressKey]);
 
   useEffect(() => {
     if (!lesson || lesson.content_type !== "VIDEO") {
@@ -244,26 +274,57 @@ export default function LessonPage() {
       if (!videoRef.current) {
         return;
       }
-      const knownDuration = lesson.duration_seconds ?? null;
-      const playerDuration = Number.isFinite(videoRef.current.duration) ? videoRef.current.duration : 0;
-      const effectiveDuration = knownDuration && knownDuration > 0 ? knownDuration : playerDuration;
-      void apiFetch(
-        `/lessons/${lesson.id}/progress/`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            last_position_seconds: Math.floor(videoRef.current.currentTime || 0),
-            completed: effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95,
-          }),
-        },
-        accessToken,
-      );
+      void syncProgress();
     }, 15000);
 
     return () => {
       window.clearInterval(progressTimer);
     };
-  }, [lesson, accessToken]);
+  }, [lesson, accessToken, syncProgress]);
+
+  useEffect(() => {
+    if (!lesson || lesson.content_type !== "VIDEO" || !videoRef.current) return;
+    const video = videoRef.current;
+
+    const updateWatchProgress = () => {
+      const effectiveDuration = getEffectiveDuration();
+      if (effectiveDuration > 0) {
+        setWatchPercent(Math.min(100, Math.max(0, Math.round(((video.currentTime || 0) / effectiveDuration) * 100))));
+      }
+      persistLocalProgress(video.currentTime || 0);
+    };
+
+    const onPause = () => {
+      void syncProgress();
+    };
+
+    const onBeforeUnload = () => {
+      const token = accessToken || getAccessToken();
+      if (!lesson || !token || !videoRef.current) return;
+      const current = Math.floor(videoRef.current.currentTime || 0);
+      persistLocalProgress(current);
+      const payload = JSON.stringify({ last_position_seconds: current, completed: false });
+      void fetch(`${API_ORIGIN}/api/lessons/${lesson.id}/progress/`, {
+        method: "POST",
+        keepalive: true,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: payload,
+      });
+    };
+
+    video.addEventListener("timeupdate", updateWatchProgress);
+    video.addEventListener("pause", onPause);
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    return () => {
+      video.removeEventListener("timeupdate", updateWatchProgress);
+      video.removeEventListener("pause", onPause);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, [lesson, accessToken, getEffectiveDuration, persistLocalProgress, syncProgress]);
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8">
@@ -272,16 +333,27 @@ export default function LessonPage() {
       <p className="mt-2 text-sm text-slate-600">{lesson?.content_type === "READING" ? "Reading lesson" : status}</p>
       {error && <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
       {lesson?.content_type === "VIDEO" ? (
-        <div className="mt-5 overflow-hidden rounded-xl border border-slate-300 bg-black">
-          <video
-            ref={videoRef}
-            controls
-            className="aspect-video w-full"
-            onEnded={() => {
-              void markCompleted();
-              setStatus("Marked as completed");
-            }}
-          />
+        <div className="mt-5">
+          <div className="overflow-hidden rounded-xl border border-slate-300 bg-black">
+            <video
+              ref={videoRef}
+              controls
+              className="aspect-video w-full"
+              onEnded={() => {
+                void markCompleted();
+                setStatus("Marked as completed");
+              }}
+            />
+          </div>
+          <div className="mt-3">
+            <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+              <span>Lesson progress</span>
+              <span>{watchPercent}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+              <div className="h-full bg-emerald-600 transition-all" style={{ width: `${watchPercent}%` }} />
+            </div>
+          </div>
         </div>
       ) : (
         <article className="prose mt-5 max-w-none rounded-xl border border-slate-200 bg-white p-5">

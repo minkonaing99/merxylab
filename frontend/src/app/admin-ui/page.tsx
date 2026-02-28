@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { ApiError, apiFetch } from "@/lib/api";
+import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
 
@@ -78,14 +78,27 @@ type QuizQuestionForm = {
   choices: QuizChoiceForm[];
 };
 
+type FeedbackTarget =
+  | "global"
+  | "step1-course"
+  | "step2-lesson"
+  | "step3-upload"
+  | "step4-quiz"
+  | "manage-course"
+  | "manage-lesson"
+  | "manage-quiz";
+
 export default function AdminUiPage() {
   const router = useRouter();
   const pathname = usePathname();
   const accessToken = useAccessToken();
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [feedback, setFeedback] = useState<{
+    target: FeedbackTarget;
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const [courses, setCourses] = useState<Course[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
@@ -97,6 +110,8 @@ export default function AdminUiPage() {
   const [selectedLessonIdForVideo, setSelectedLessonIdForVideo] = useState<number | null>(null);
   const [selectedLessonIdForQuiz, setSelectedLessonIdForQuiz] = useState<number | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "processing">("idle");
   const [dragOver, setDragOver] = useState(false);
   const [courseEnrollments, setCourseEnrollments] = useState<EnrollmentRow[]>([]);
   const [showEnrollmentsForCourseId, setShowEnrollmentsForCourseId] = useState<number | null>(null);
@@ -165,6 +180,19 @@ export default function AdminUiPage() {
     [lessons, selectedCourseId],
   );
 
+  const renderFeedback = (target: FeedbackTarget) => {
+    if (!feedback || feedback.target !== target) return null;
+    return (
+      <p
+        className={`mt-3 rounded-md p-3 text-sm ${
+          feedback.type === "success" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"
+        }`}
+      >
+        {feedback.message}
+      </p>
+    );
+  };
+
   const loadData = useCallback(async () => {
     if (!accessToken) return;
     const [courseData, lessonData, quizData, insightData] = await Promise.all([
@@ -203,7 +231,11 @@ export default function AdminUiPage() {
   useEffect(() => {
     if (isAdmin !== true) return;
     void loadData().catch((err) => {
-      setError(err instanceof ApiError ? err.message : "Failed to load admin data.");
+      setFeedback({
+        target: "global",
+        type: "error",
+        message: err instanceof ApiError ? err.message : "Failed to load admin data.",
+      });
     });
   }, [isAdmin, loadData]);
 
@@ -217,16 +249,15 @@ export default function AdminUiPage() {
       .catch(() => setSections([]));
   }, [accessToken, isAdmin, selectedCourseId]);
 
-  const runAction = async (action: () => Promise<void>, successMessage: string) => {
+  const runAction = async (action: () => Promise<void>, successMessage: string, target: FeedbackTarget) => {
     setLoading(true);
-    setError("");
-    setNotice("");
+    setFeedback(null);
     try {
       await action();
-      setNotice(successMessage);
+      setFeedback({ target, type: "success", message: successMessage });
       await loadData();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Action failed.");
+      setFeedback({ target, type: "error", message: err instanceof ApiError ? err.message : "Action failed." });
     } finally {
       setLoading(false);
     }
@@ -246,6 +277,7 @@ export default function AdminUiPage() {
         setCourseForm({ title: "", slug: "", description: "", level: "Beginner", is_published: true });
       },
       "Course created. Continue with Step 2.",
+      "step1-course",
     );
   };
 
@@ -281,22 +313,64 @@ export default function AdminUiPage() {
         });
       },
       "Lesson created.",
+      "step2-lesson",
     );
   };
 
   const uploadVideo = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!accessToken || !videoFile || !selectedLessonIdForVideo) return;
-    await runAction(
-      async () => {
+    setLoading(true);
+    setFeedback(null);
+    setUploadProgress(0);
+    setUploadPhase("uploading");
+    try {
+      await new Promise<void>((resolve, reject) => {
         const formData = new FormData();
         formData.append("lesson_id", String(selectedLessonIdForVideo));
         formData.append("video", videoFile);
-        await apiFetch("/admin/upload-video/", { method: "POST", body: formData }, accessToken);
-        setVideoFile(null);
-      },
-      "Video uploaded and converted to HLS.",
-    );
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `${API_BASE_URL}/admin/upload-video/`);
+        xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+        xhr.upload.onprogress = (e) => {
+          if (!e.lengthComputable) return;
+          const percent = Math.round((e.loaded / e.total) * 100);
+          setUploadProgress(percent);
+          if (percent >= 100) {
+            setUploadPhase("processing");
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadProgress(100);
+            setUploadPhase("idle");
+            resolve();
+            return;
+          }
+          try {
+            const payload = JSON.parse(xhr.responseText) as { detail?: string };
+            reject(new Error(payload.detail || `Upload failed (${xhr.status})`));
+          } catch {
+            reject(new Error(`Upload failed (${xhr.status})`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Network error during upload."));
+        xhr.send(formData);
+      });
+
+      setVideoFile(null);
+      setFeedback({ target: "step3-upload", type: "success", message: "Video uploaded and converted to HLS." });
+      await loadData();
+    } catch (err) {
+      setFeedback({ target: "step3-upload", type: "error", message: err instanceof Error ? err.message : "Video upload failed." });
+    } finally {
+      setLoading(false);
+      window.setTimeout(() => {
+        setUploadProgress(0);
+        setUploadPhase("idle");
+      }, 1200);
+    }
   };
 
   const addQuestion = () => {
@@ -351,7 +425,7 @@ export default function AdminUiPage() {
 
     const hasCorrectPerQuestion = quizForm.questions.every((q) => q.choices.some((c) => c.is_correct));
     if (!hasCorrectPerQuestion) {
-      setError("Each question needs at least one correct answer.");
+      setFeedback({ target: "step4-quiz", type: "error", message: "Each question needs at least one correct answer." });
       return;
     }
 
@@ -372,12 +446,13 @@ export default function AdminUiPage() {
         );
       },
       "Quiz created.",
+      "step4-quiz",
     );
   };
 
   const loadEnrollmentsForCourse = async (courseId: number) => {
     if (!accessToken) return;
-    setError("");
+    setFeedback(null);
     try {
       const payload = await apiFetch<{ enrollments: EnrollmentRow[] }>(
         `/admin/courses/${courseId}/enrollments/`,
@@ -387,7 +462,7 @@ export default function AdminUiPage() {
       setShowEnrollmentsForCourseId(courseId);
       setCourseEnrollments(payload.enrollments);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to load enrollments.");
+      setFeedback({ target: "manage-course", type: "error", message: err instanceof ApiError ? err.message : "Failed to load enrollments." });
     }
   };
 
@@ -412,6 +487,7 @@ export default function AdminUiPage() {
         );
       },
       "Course updated.",
+      "manage-course",
     );
   };
 
@@ -424,6 +500,7 @@ export default function AdminUiPage() {
         setEditCourseForm({ id: "", title: "", slug: "", level: "", description: "", is_published: false });
       },
       "Course deleted.",
+      "manage-course",
     );
   };
 
@@ -448,6 +525,7 @@ export default function AdminUiPage() {
         );
       },
       "Lesson updated.",
+      "manage-lesson",
     );
   };
 
@@ -460,6 +538,7 @@ export default function AdminUiPage() {
         setEditLessonForm({ id: "", title: "", order: 1, content_type: "VIDEO", is_preview: false, reading_content: "" });
       },
       "Lesson deleted.",
+      "manage-lesson",
     );
   };
 
@@ -481,6 +560,7 @@ export default function AdminUiPage() {
         );
       },
       "Quiz updated.",
+      "manage-quiz",
     );
   };
 
@@ -493,6 +573,7 @@ export default function AdminUiPage() {
         setEditQuizForm({ id: "", passing_score: 70, time_limit_sec: "" });
       },
       "Quiz deleted.",
+      "manage-quiz",
     );
   };
 
@@ -506,8 +587,7 @@ export default function AdminUiPage() {
       <p className="mt-2 text-sm text-slate-600">
         Follow the steps in order: 1) Course 2) Lesson 3) Video 4) Quiz
       </p>
-      {error && <p className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-      {notice && <p className="mt-4 rounded-md bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</p>}
+      {renderFeedback("global")}
 
       {insights && (
         <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -569,6 +649,7 @@ export default function AdminUiPage() {
             Publish immediately
           </label>
           <button disabled={loading} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white">Create Course</button>
+          {renderFeedback("step1-course")}
         </form>
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -624,6 +705,7 @@ export default function AdminUiPage() {
             Preview lesson (free without enrollment)
           </label>
           <button disabled={loading || selectedCourseId == null} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60">Save Lesson</button>
+          {renderFeedback("step2-lesson")}
         </form>
 
         <form onSubmit={uploadVideo} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -668,6 +750,24 @@ export default function AdminUiPage() {
           <button disabled={loading || !videoFile || !selectedLessonIdForVideo} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
             {loading ? "Processing..." : "Upload & Convert"}
           </button>
+          {(uploadProgress > 0 || (loading && Boolean(videoFile) && Boolean(selectedLessonIdForVideo))) && (
+            <div className="mt-3">
+              <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                <span>
+                  {uploadPhase === "processing" ? "Processing video" : "Upload progress"}
+                </span>
+                <span>{uploadPhase === "processing" ? "Please wait..." : `${uploadProgress}%`}</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                {uploadPhase === "processing" ? (
+                  <div className="h-full w-1/3 animate-pulse bg-amber-600" />
+                ) : (
+                  <div className="h-full bg-emerald-600 transition-all" style={{ width: `${uploadProgress}%` }} />
+                )}
+              </div>
+            </div>
+          )}
+          {renderFeedback("step3-upload")}
         </form>
 
         <form onSubmit={createQuiz} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
@@ -719,6 +819,7 @@ export default function AdminUiPage() {
               Save Quiz
             </button>
           </div>
+          {renderFeedback("step4-quiz")}
         </form>
       </section>
 
@@ -779,6 +880,7 @@ export default function AdminUiPage() {
                   </button>
                 </div>
               </form>
+              {renderFeedback("manage-course")}
               {showEnrollmentsForCourseId === Number(editCourseForm.id) && (
                 <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
                   <p className="text-sm font-medium">Enrolled Students ({courseEnrollments.length})</p>
@@ -826,25 +928,28 @@ export default function AdminUiPage() {
             ))}
           </select>
           {editLessonForm.id && (
-            <form onSubmit={saveLessonEdits} className="mt-3 space-y-2">
-              <input className="w-full rounded border px-3 py-2" value={editLessonForm.title} onChange={(e) => setEditLessonForm((v) => ({ ...v, title: e.target.value }))} />
-              <input type="number" min={1} className="w-full rounded border px-3 py-2" value={editLessonForm.order} onChange={(e) => setEditLessonForm((v) => ({ ...v, order: Number(e.target.value) }))} />
-              <select className="w-full rounded border px-3 py-2" value={editLessonForm.content_type} onChange={(e) => setEditLessonForm((v) => ({ ...v, content_type: e.target.value as "VIDEO" | "READING" }))}>
-                <option value="VIDEO">Video Lesson</option>
-                <option value="READING">Reading Lesson</option>
-              </select>
-              {editLessonForm.content_type === "READING" && (
-                <textarea className="w-full rounded border px-3 py-2" value={editLessonForm.reading_content} onChange={(e) => setEditLessonForm((v) => ({ ...v, reading_content: e.target.value }))} />
-              )}
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={editLessonForm.is_preview} onChange={(e) => setEditLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
-                Preview
-              </label>
-              <div className="flex gap-2">
-                <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Lesson</button>
-                <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteLesson}>Delete Lesson</button>
-              </div>
-            </form>
+            <>
+              <form onSubmit={saveLessonEdits} className="mt-3 space-y-2">
+                <input className="w-full rounded border px-3 py-2" value={editLessonForm.title} onChange={(e) => setEditLessonForm((v) => ({ ...v, title: e.target.value }))} />
+                <input type="number" min={1} className="w-full rounded border px-3 py-2" value={editLessonForm.order} onChange={(e) => setEditLessonForm((v) => ({ ...v, order: Number(e.target.value) }))} />
+                <select className="w-full rounded border px-3 py-2" value={editLessonForm.content_type} onChange={(e) => setEditLessonForm((v) => ({ ...v, content_type: e.target.value as "VIDEO" | "READING" }))}>
+                  <option value="VIDEO">Video Lesson</option>
+                  <option value="READING">Reading Lesson</option>
+                </select>
+                {editLessonForm.content_type === "READING" && (
+                  <textarea className="w-full rounded border px-3 py-2" value={editLessonForm.reading_content} onChange={(e) => setEditLessonForm((v) => ({ ...v, reading_content: e.target.value }))} />
+                )}
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={editLessonForm.is_preview} onChange={(e) => setEditLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
+                  Preview
+                </label>
+                <div className="flex gap-2">
+                  <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Lesson</button>
+                  <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteLesson}>Delete Lesson</button>
+                </div>
+              </form>
+              {renderFeedback("manage-lesson")}
+            </>
           )}
         </div>
 
@@ -872,14 +977,17 @@ export default function AdminUiPage() {
             ))}
           </select>
           {editQuizForm.id && (
-            <form onSubmit={saveQuizEdits} className="mt-3 grid gap-2 md:grid-cols-3">
-              <input type="number" min={0} max={100} className="rounded border px-3 py-2" value={editQuizForm.passing_score} onChange={(e) => setEditQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} />
-              <input type="number" min={1} className="rounded border px-3 py-2" value={editQuizForm.time_limit_sec} onChange={(e) => setEditQuizForm((v) => ({ ...v, time_limit_sec: e.target.value }))} placeholder="Time limit sec" />
-              <div className="flex gap-2">
-                <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Quiz</button>
-                <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteQuiz}>Delete Quiz</button>
-              </div>
-            </form>
+            <>
+              <form onSubmit={saveQuizEdits} className="mt-3 grid gap-2 md:grid-cols-3">
+                <input type="number" min={0} max={100} className="rounded border px-3 py-2" value={editQuizForm.passing_score} onChange={(e) => setEditQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} />
+                <input type="number" min={1} className="rounded border px-3 py-2" value={editQuizForm.time_limit_sec} onChange={(e) => setEditQuizForm((v) => ({ ...v, time_limit_sec: e.target.value }))} placeholder="Time limit sec" />
+                <div className="flex gap-2">
+                  <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Quiz</button>
+                  <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteQuiz}>Delete Quiz</button>
+                </div>
+              </form>
+              {renderFeedback("manage-quiz")}
+            </>
           )}
         </div>
       </section>
