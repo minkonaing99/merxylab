@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, Source_Serif_4 } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 
@@ -24,7 +25,21 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <Script id="theme-init" strategy="beforeInteractive">
+          {`(() => {
+              try {
+                const key = "merxylab_theme";
+                const saved = localStorage.getItem(key);
+                const theme = saved === "dark" || saved === "light"
+                  ? saved
+                  : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+                document.documentElement.setAttribute("data-theme", theme);
+              } catch {}
+            })();`}
+        </Script>
+      </head>
       <body
         className={`${spaceGrotesk.variable} ${sourceSerif.variable} antialiased`}
       >

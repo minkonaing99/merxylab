@@ -24,33 +24,51 @@ from rest_framework.response import Response
 
 from core.models import (
     ActiveStreamSession,
+    Certificate,
     Course,
+    CreditTransaction,
+    CreditWallet,
     Enrollment,
+    FinalExam,
+    FinalExamAttempt,
+    FinalExamChoice,
+    FinalExamQuestion,
     Lesson,
     QuizAttempt,
+    StudentProfile,
     UserLessonProgress,
 )
 from core.permissions import IsAdminRole
 from core.mongo_store import delete_quiz_payload, get_quiz_map, get_quiz_payload, set_quiz_payload
 from core.serializers import (
+    AdminCreditAdjustSerializer,
     AdminCourseCreateSerializer,
     AdminCourseUpdateSerializer,
+    AdminFinalExamUpsertSerializer,
     AdminLessonCreateSerializer,
     AdminLessonUpdateSerializer,
     AdminQuizCreateSerializer,
     AdminQuizUpdateSerializer,
     AdminSectionSerializer,
+    AdminStudentListRowSerializer,
     AdminUploadHlsMetadataSerializer,
     AdminUploadVideoSerializer,
+    CertificateSerializer,
+    CreditTransactionSerializer,
+    CreditWalletSerializer,
     CourseDetailSerializer,
     CourseListSerializer,
     EnrollmentSerializer,
+    FinalExamAttemptSerializer,
+    FinalExamSerializer,
+    FinalExamSubmitSerializer,
     LessonAccessSerializer,
     LessonDetailSerializer,
     QuizAttemptSerializer,
     QuizSubmitSerializer,
     StreamAccessSerializer,
     StreamHeartbeatSerializer,
+    StudentProfileSerializer,
     UserLessonProgressSerializer,
     UserLessonProgressUpsertSerializer,
 )
@@ -166,6 +184,89 @@ def _lesson_access_denial_message(user, lesson):
     if not _is_enrolled(user, lesson.course):
         return "Enrollment required for this lesson."
     return "Lesson is locked. Complete previous lesson and pass its quiz to unlock."
+
+
+def _profile_completion_flags(profile):
+    return {
+        "has_full_name": bool(profile.full_name.strip()),
+        "has_date_of_birth": bool(profile.date_of_birth),
+        "has_passport_number": bool(profile.passport_number.strip()),
+        "has_passport_photo": bool(profile.passport_photo),
+    }
+
+
+def _wallet_for_user(user):
+    wallet, _ = CreditWallet.objects.get_or_create(user=user, defaults={"balance_credits": 0})
+    return wallet
+
+
+def _course_completion_summary(user, course):
+    lessons = _ordered_course_lessons(course)
+    if not lessons:
+        return {
+            "total_lessons": 0,
+            "completed_lessons": 0,
+            "completion_rate": 0,
+            "all_lessons_completed": False,
+            "missing_lessons": [],
+        }
+
+    completed_ids = set(
+        UserLessonProgress.objects.filter(user=user, lesson__course=course, completed=True).values_list("lesson_id", flat=True)
+    )
+    passed_quiz_lesson_ids = set(
+        QuizAttempt.objects.filter(
+            user=user,
+            passed=True,
+            lesson__course=course,
+        ).values_list("lesson_id", flat=True)
+    )
+    quiz_map = get_quiz_map(lessons)
+    completed_count = 0
+    missing = []
+
+    for lesson in lessons:
+        has_quiz = lesson.id in quiz_map
+        lesson_done = lesson.id in completed_ids and ((not has_quiz) or (lesson.id in passed_quiz_lesson_ids))
+        if lesson_done:
+            completed_count += 1
+            continue
+        missing.append(
+            {
+                "lesson_id": lesson.id,
+                "lesson_title": lesson.title,
+                "needs_lesson_completion": lesson.id not in completed_ids,
+                "needs_quiz_pass": has_quiz and lesson.id not in passed_quiz_lesson_ids,
+            }
+        )
+
+    rate = round((completed_count / len(lessons)) * 100)
+    return {
+        "total_lessons": len(lessons),
+        "completed_lessons": completed_count,
+        "completion_rate": rate,
+        "all_lessons_completed": completed_count == len(lessons),
+        "missing_lessons": missing,
+    }
+
+
+def _final_exam_unlock_summary(user, course):
+    completion = _course_completion_summary(user, course)
+    profile, _ = StudentProfile.objects.get_or_create(user=user)
+    profile_flags = _profile_completion_flags(profile)
+    profile_completed = all(profile_flags.values())
+    exam = FinalExam.objects.filter(course=course, is_published=True).first()
+    exam_exists = exam is not None
+    can_take_final_exam = completion["all_lessons_completed"] and exam_exists
+    return {
+        "completion": completion,
+        "profile": profile,
+        "profile_flags": profile_flags,
+        "profile_completed": profile_completed,
+        "exam": exam,
+        "exam_exists": exam_exists,
+        "can_take_final_exam": can_take_final_exam,
+    }
 
 
 def _issue_stream_token(*, user_id, lesson_id, session_id, device_id):
@@ -289,6 +390,9 @@ def register(request):
 @permission_classes([IsAuthenticated])
 def me(request):
     user = request.user
+    profile, _ = StudentProfile.objects.get_or_create(user=user)
+    wallet = _wallet_for_user(user)
+    profile_flags = _profile_completion_flags(profile)
     return Response(
         {
             "id": user.id,
@@ -298,8 +402,38 @@ def me(request):
             "is_superuser": user.is_superuser,
             "groups": list(user.groups.values_list("name", flat=True)),
             "role": _role_for_user(user),
+            "profile_completed": all(profile_flags.values()),
+            "credits": wallet.balance_credits,
         }
     )
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@permission_classes([IsAuthenticated])
+def my_profile(request):
+    profile, _ = StudentProfile.objects.get_or_create(user=request.user)
+    wallet = _wallet_for_user(request.user)
+    if request.method == "GET":
+        serializer = StudentProfileSerializer(profile, context={"request": request})
+        payload = serializer.data
+        payload["credits"] = wallet.balance_credits
+        payload["completion_flags"] = _profile_completion_flags(profile)
+        payload["profile_completed"] = all(payload["completion_flags"].values())
+        return Response(payload)
+
+    serializer = StudentProfileSerializer(
+        profile,
+        data=request.data,
+        partial=request.method == "PATCH",
+        context={"request": request},
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    payload = serializer.data
+    payload["credits"] = wallet.balance_credits
+    payload["completion_flags"] = _profile_completion_flags(profile)
+    payload["profile_completed"] = all(payload["completion_flags"].values())
+    return Response(payload)
 
 
 @api_view(["POST"])
@@ -358,20 +492,58 @@ def course_lessons(request, course_id):
 @permission_classes([IsAuthenticated])
 def enroll_course(request, course_id):
     course = get_object_or_404(Course, id=course_id, is_published=True)
-    enrollment, created = Enrollment.objects.get_or_create(
-        user=request.user,
-        course=course,
-        defaults={"status": Enrollment.Status.ACTIVE},
-    )
+    with transaction.atomic():
+        wallet, _ = CreditWallet.objects.get_or_create(user=request.user, defaults={"balance_credits": 0})
+        wallet = CreditWallet.objects.select_for_update().get(id=wallet.id)
+        enrollment = Enrollment.objects.filter(user=request.user, course=course).first()
+        charged = False
+        tx = None
 
-    if not created and enrollment.status != Enrollment.Status.ACTIVE:
-        enrollment.status = Enrollment.Status.ACTIVE
-        enrollment.save(update_fields=["status", "updated_at"])
+        if enrollment is None:
+            price = int(course.price_cents or 0)
+            if price > 0:
+                if wallet.balance_credits < price:
+                    return Response(
+                        {
+                            "detail": "Insufficient credits to enroll.",
+                            "required_credits": price,
+                            "current_credits": wallet.balance_credits,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                wallet.balance_credits -= price
+                wallet.save(update_fields=["balance_credits", "updated_at"])
+                tx = CreditTransaction.objects.create(
+                    user=request.user,
+                    amount=-price,
+                    balance_after=wallet.balance_credits,
+                    kind=CreditTransaction.Kind.COURSE_PURCHASE,
+                    note=f"Enrollment purchase: {course.title}",
+                    course=course,
+                    created_by=request.user,
+                )
+                charged = True
+
+            enrollment = Enrollment.objects.create(
+                user=request.user,
+                course=course,
+                status=Enrollment.Status.ACTIVE,
+                payment_provider="CREDITS" if charged else "",
+                payment_ref=str(tx.id) if tx else "",
+            )
+            created = True
+        else:
+            created = False
+            if enrollment.status != Enrollment.Status.ACTIVE:
+                enrollment.status = Enrollment.Status.ACTIVE
+                enrollment.save(update_fields=["status", "updated_at"])
 
     return Response(
         {
             "enrolled": True,
             "created": created,
+            "charged_credits": int(course.price_cents or 0) if created else 0,
+            "current_credits": _wallet_for_user(request.user).balance_credits,
             "enrollment": EnrollmentSerializer(enrollment).data,
         },
         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -383,6 +555,288 @@ def enroll_course(request, course_id):
 def my_enrollments(request):
     enrollments = Enrollment.objects.filter(user=request.user).select_related("course").order_by("-enrolled_at")
     return Response(EnrollmentSerializer(enrollments, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_wallet(request):
+    wallet = _wallet_for_user(request.user)
+    txs = CreditTransaction.objects.filter(user=request.user).select_related("course", "created_by").order_by("-created_at")[:30]
+    return Response(
+        {
+            "wallet": CreditWalletSerializer(wallet).data,
+            "transactions": CreditTransactionSerializer(txs, many=True).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def course_exam_eligibility(request, course_id):
+    course = get_object_or_404(Course, id=course_id, is_published=True)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+
+    summary = _final_exam_unlock_summary(request.user, course)
+    completion = summary["completion"]
+    profile_flags = summary["profile_flags"]
+    profile_completed = summary["profile_completed"]
+    can_take_final_exam = summary["can_take_final_exam"]
+    exam_exists = summary["exam_exists"]
+
+    return Response(
+        {
+            "course_id": course.id,
+            "course_title": course.title,
+            "final_exam_exists": exam_exists,
+            "can_take_final_exam": can_take_final_exam,
+            "certificate_ready": can_take_final_exam and profile_completed,
+            "profile_completed": profile_completed,
+            "profile_completion_flags": profile_flags,
+            "progress": completion,
+            "next_step": (
+                "Take final exam."
+                if can_take_final_exam
+                else ("Final exam is not configured yet." if not exam_exists else "Complete all lessons and pass each lesson quiz first.")
+            ),
+        }
+    )
+
+
+@api_view(["GET", "PUT"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_course_final_exam(request, course_id):
+    course = get_object_or_404(Course, id=course_id)
+    exam = FinalExam.objects.filter(course=course).first()
+
+    if request.method == "GET":
+        if exam is None:
+            return Response({"detail": "Final exam not configured."}, status=status.HTTP_404_NOT_FOUND)
+        exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+        return Response(FinalExamSerializer(exam, context={"include_answers": True}).data)
+
+    serializer = AdminFinalExamUpsertSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+
+    with transaction.atomic():
+        if exam is None:
+            exam = FinalExam.objects.create(
+                course=course,
+                title=data.get("title", "Final Exam"),
+                passing_score=data.get("passing_score", 70),
+                time_limit_sec=data.get("time_limit_sec"),
+                is_published=data.get("is_published", False),
+            )
+        else:
+            exam.title = data.get("title", exam.title)
+            exam.passing_score = data.get("passing_score", exam.passing_score)
+            exam.time_limit_sec = data.get("time_limit_sec")
+            exam.is_published = data.get("is_published", exam.is_published)
+            exam.save(update_fields=["title", "passing_score", "time_limit_sec", "is_published", "updated_at"])
+            exam.questions.all().delete()
+
+        question_rows = []
+        choice_rows = []
+        for question_data in sorted(data["questions"], key=lambda row: row["order"]):
+            question = FinalExamQuestion.objects.create(
+                exam=exam,
+                prompt=question_data["prompt"],
+                order=question_data["order"],
+            )
+            question_rows.append(question)
+            for choice_data in sorted(question_data["choices"], key=lambda row: row["order"]):
+                choice_rows.append(
+                    FinalExamChoice(
+                        question=question,
+                        text=choice_data["text"],
+                        is_correct=choice_data.get("is_correct", False),
+                        order=choice_data["order"],
+                    )
+                )
+        if choice_rows:
+            FinalExamChoice.objects.bulk_create(choice_rows)
+
+    exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+    return Response(FinalExamSerializer(exam, context={"include_answers": True}).data, status=status.HTTP_200_OK)
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_course_final_exam_publish(request, course_id):
+    exam = get_object_or_404(FinalExam, course_id=course_id)
+    serializer = serializers.Serializer(data=request.data)
+    serializer.fields["is_published"] = serializers.BooleanField(required=True)
+    serializer.is_valid(raise_exception=True)
+    exam.is_published = serializer.validated_data["is_published"]
+    exam.save(update_fields=["is_published", "updated_at"])
+    exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+    return Response(FinalExamSerializer(exam, context={"include_answers": True}).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_course_final_exam_reset(request, course_id):
+    exam = get_object_or_404(FinalExam, course_id=course_id)
+    with transaction.atomic():
+        exam.questions.all().delete()
+        exam.is_published = False
+        exam.save(update_fields=["is_published", "updated_at"])
+    exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+    return Response(
+        {
+            "detail": "Final exam reset. All questions removed and exam unpublished.",
+            "exam": FinalExamSerializer(exam, context={"include_answers": True}).data,
+        }
+    )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_final_exam_question_detail(request, question_id):
+    question = get_object_or_404(FinalExamQuestion.objects.select_related("exam"), id=question_id)
+    exam = question.exam
+    question.delete()
+    remaining = list(exam.questions.all().order_by("order", "id"))
+    for idx, row in enumerate(remaining, start=1):
+        if row.order != idx:
+            row.order = idx
+            row.save(update_fields=["order", "updated_at"])
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def course_final_exam(request, course_id):
+    course = get_object_or_404(Course, id=course_id, is_published=True)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+
+    summary = _final_exam_unlock_summary(request.user, course)
+    exam = summary["exam"]
+    if exam is None:
+        return Response({"detail": "Final exam is not available for this course."}, status=status.HTTP_404_NOT_FOUND)
+    if not summary["can_take_final_exam"]:
+        return Response(
+            {"detail": "Final exam is locked. Complete all lessons and lesson quizzes first."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+    return Response(FinalExamSerializer(exam, context={"include_answers": False}).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def submit_course_final_exam(request, course_id):
+    course = get_object_or_404(Course, id=course_id, is_published=True)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+
+    summary = _final_exam_unlock_summary(request.user, course)
+    exam = summary["exam"]
+    if exam is None:
+        return Response({"detail": "Final exam is not available for this course."}, status=status.HTTP_404_NOT_FOUND)
+    if not summary["can_take_final_exam"]:
+        return Response(
+            {"detail": "Final exam is locked. Complete all lessons and lesson quizzes first."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = FinalExamSubmitSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    submitted_answers = serializer.validated_data["answers"]
+
+    exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
+    questions = list(exam.questions.all().order_by("order", "id"))
+    if not questions:
+        return Response({"detail": "Final exam question bank is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+    question_map = {q.id: q for q in questions}
+    seen_questions = set()
+    normalized_answers = []
+    correct_count = 0
+
+    for item in submitted_answers:
+        qid = int(item["question_id"])
+        cid = int(item["choice_id"])
+        if qid in seen_questions:
+            return Response({"detail": f"Duplicate answer for question {qid}."}, status=status.HTTP_400_BAD_REQUEST)
+        seen_questions.add(qid)
+        question = question_map.get(qid)
+        if question is None:
+            return Response({"detail": f"Question {qid} is not part of this exam."}, status=status.HTTP_400_BAD_REQUEST)
+        choice = next((c for c in question.choices.all() if c.id == cid), None)
+        if choice is None:
+            return Response({"detail": f"Choice {cid} is invalid for question {qid}."}, status=status.HTTP_400_BAD_REQUEST)
+        if choice.is_correct:
+            correct_count += 1
+        normalized_answers.append({"question_id": qid, "choice_id": cid})
+
+    if len(seen_questions) != len(questions):
+        return Response({"detail": "All exam questions must be answered."}, status=status.HTTP_400_BAD_REQUEST)
+
+    score = round((correct_count / len(questions)) * 100, 2)
+    passed = score >= float(exam.passing_score)
+
+    with transaction.atomic():
+        attempt = FinalExamAttempt.objects.create(
+            user=request.user,
+            exam=exam,
+            score=score,
+            passed=passed,
+            answers_payload=normalized_answers,
+        )
+        certificate = None
+        certificate_created = False
+        if passed:
+            certificate, certificate_created = Certificate.objects.get_or_create(
+                user=request.user,
+                course=course,
+                defaults={
+                    "exam_attempt": attempt,
+                    "certificate_code": uuid.uuid4().hex[:16].upper(),
+                },
+            )
+            if not certificate_created and certificate.exam_attempt_id is None:
+                certificate.exam_attempt = attempt
+                certificate.save(update_fields=["exam_attempt", "updated_at"])
+
+    payload = FinalExamAttemptSerializer(attempt).data
+    payload["summary"] = {
+        "total_questions": len(questions),
+        "correct_answers": correct_count,
+        "passing_score": int(exam.passing_score),
+    }
+    payload["certificate_issued"] = bool(passed)
+    payload["certificate_created"] = bool(certificate_created) if passed else False
+    payload["certificate"] = CertificateSerializer(certificate).data if passed and certificate else None
+    return Response(payload, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def course_final_exam_attempts(request, course_id):
+    course = get_object_or_404(Course, id=course_id, is_published=True)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+    exam = FinalExam.objects.filter(course=course, is_published=True).first()
+    if exam is None:
+        return Response([], status=status.HTTP_200_OK)
+    attempts = FinalExamAttempt.objects.filter(user=request.user, exam=exam).order_by("-attempted_at")
+    return Response(FinalExamAttemptSerializer(attempts, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_course_certificate(request, course_id):
+    course = get_object_or_404(Course, id=course_id, is_published=True)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+    certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
+    if certificate is None:
+        return Response({"issued": False, "detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
+    return Response({"issued": True, "certificate": CertificateSerializer(certificate).data})
 
 
 @api_view(["GET"])
@@ -776,6 +1230,103 @@ def admin_course_enrollments(request, course_id):
             "enrollment_count": len(payload),
             "enrollments": payload,
         }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_students(request):
+    user_model = get_user_model()
+    users = user_model.objects.exclude(is_superuser=True).order_by("id")
+    rows = []
+    for user in users:
+        role = _role_for_user(user)
+        if role != "student":
+            continue
+        wallet = _wallet_for_user(user)
+        rows.append(
+            {
+                "user_id": user.id,
+                "username": user.username,
+                "email": user.email or "",
+                "role": role,
+                "credits": wallet.balance_credits,
+                "enrollments": Enrollment.objects.filter(user=user).count(),
+                "owned_courses": list(
+                    Enrollment.objects.filter(user=user, status=Enrollment.Status.ACTIVE)
+                    .select_related("course")
+                    .values_list("course__title", flat=True)
+                ),
+            }
+        )
+    return Response(AdminStudentListRowSerializer(rows, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_wallet(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+    wallet = _wallet_for_user(student)
+    txs = CreditTransaction.objects.filter(user=student).select_related("course", "created_by").order_by("-created_at")[:100]
+    enrollments = Enrollment.objects.filter(user=student).select_related("course").order_by("-enrolled_at")
+    return Response(
+        {
+            "student": {"id": student.id, "username": student.username, "email": student.email or ""},
+            "wallet": CreditWalletSerializer(wallet).data,
+            "transactions": CreditTransactionSerializer(txs, many=True).data,
+            "enrollments": EnrollmentSerializer(enrollments, many=True).data,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_wallet_adjust(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer = AdminCreditAdjustSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    amount = int(serializer.validated_data["amount"])
+    note = serializer.validated_data.get("note", "")
+    if amount == 0:
+        return Response({"detail": "Amount must not be zero."}, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        wallet = CreditWallet.objects.select_for_update().filter(user=student).first()
+        if wallet is None:
+            wallet = CreditWallet.objects.create(user=student, balance_credits=0)
+        next_balance = wallet.balance_credits + amount
+        if next_balance < 0:
+            return Response(
+                {
+                    "detail": "Insufficient credits for this deduction.",
+                    "current_credits": wallet.balance_credits,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        wallet.balance_credits = next_balance
+        wallet.save(update_fields=["balance_credits", "updated_at"])
+        tx = CreditTransaction.objects.create(
+            user=student,
+            amount=amount,
+            balance_after=next_balance,
+            kind=CreditTransaction.Kind.ADMIN_ADJUST if amount >= 0 else CreditTransaction.Kind.REFUND,
+            note=note,
+            created_by=request.user,
+        )
+
+    return Response(
+        {
+            "wallet": CreditWalletSerializer(wallet).data,
+            "transaction": CreditTransactionSerializer(tx).data,
+        },
+        status=status.HTTP_201_CREATED,
     )
 
 

@@ -1,0 +1,249 @@
+"use client";
+
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { apiFetch, ApiError } from "@/lib/api";
+import { getAccessToken } from "@/lib/auth";
+import { useAccessToken } from "@/hooks/use-access-token";
+
+type StudentRow = {
+  user_id: number;
+  username: string;
+  email: string;
+  role: string;
+  credits: number;
+  enrollments: number;
+  owned_courses?: string[];
+};
+
+type WalletPayload = {
+  student: { id: number; username: string; email: string };
+  wallet: { balance_credits: number; updated_at: string };
+  transactions: Array<{
+    id: number;
+    amount: number;
+    balance_after: number;
+    kind: string;
+    note: string;
+    course_title?: string;
+    created_by_username?: string;
+    created_at: string;
+  }>;
+  enrollments: Array<{
+    id: number;
+    course: { title: string };
+    status: string;
+    payment_provider: string;
+  }>;
+};
+
+export default function AdminStudentsPage() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const accessToken = useAccessToken();
+  const [students, setStudents] = useState<StudentRow[]>([]);
+  const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
+  const [walletDetail, setWalletDetail] = useState<WalletPayload | null>(null);
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+
+  const loadStudents = useCallback(async (token: string) => {
+    const rows = await apiFetch<StudentRow[]>("/admin/students/", {}, token);
+    setStudents(rows);
+  }, []);
+
+  const loadWallet = useCallback(async (token: string, userId: number) => {
+    const payload = await apiFetch<WalletPayload>(`/admin/students/${userId}/wallet/`, {}, token);
+    setWalletDetail(payload);
+  }, []);
+
+  useEffect(() => {
+    const token = accessToken || getAccessToken();
+    if (!token) {
+      router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+      return;
+    }
+    apiFetch<{ role?: string }>("/me/", {}, token)
+      .then(async (me) => {
+        if (me.role !== "admin") {
+          setIsAdmin(false);
+          router.replace("/dashboard");
+          return;
+        }
+        setIsAdmin(true);
+        await loadStudents(token);
+      })
+      .catch(() => {
+        setIsAdmin(false);
+        router.replace("/dashboard");
+      });
+  }, [accessToken, loadStudents, pathname, router]);
+
+  useEffect(() => {
+    const token = accessToken || getAccessToken();
+    if (!token || !selectedStudentId) return;
+    loadWallet(token, selectedStudentId).catch(() => setWalletDetail(null));
+  }, [accessToken, loadWallet, selectedStudentId]);
+
+  const adjustCredits = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const token = accessToken || getAccessToken();
+    if (!token || !selectedStudentId) return;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      await apiFetch(
+        `/admin/students/${selectedStudentId}/wallet/adjust/`,
+        { method: "POST", body: JSON.stringify({ amount: Number(amount), note }) },
+        token,
+      );
+      await loadStudents(token);
+      await loadWallet(token, selectedStudentId);
+      setAmount("");
+      setNote("");
+      setNotice("Credits updated.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to adjust credits.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (isAdmin === null) {
+    return <main className="page-wrap">Checking access...</main>;
+  }
+
+  return (
+    <main className="page-wrap fade-up">
+      <h1 className="text-3xl font-semibold md:text-4xl">Student Credit Management</h1>
+      <p className="mt-2 text-sm muted">Manage student balances, transaction history, and enrollment payment status.</p>
+      {error && <p className="mt-4 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
+      {notice && <p className="mt-4 rounded-lg border border-emerald-300 bg-emerald-500/10 p-3 text-sm text-emerald-500">{notice}</p>}
+
+      <section className="mt-6 grid gap-4 lg:grid-cols-2">
+        <div className="surface p-5">
+          <h2 className="text-lg font-semibold">Students</h2>
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="border-b text-slate-600">
+                <tr>
+                  <th className="py-2 pr-4">Username</th>
+                  <th className="py-2 pr-4">Credits</th>
+                  <th className="py-2 pr-4">Owned Courses</th>
+                  <th className="py-2 pr-0">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {students.map((student) => (
+                  <tr key={student.user_id} className="border-b last:border-0">
+                    <td className="py-2 pr-4">
+                      <div className="font-medium">{student.username}</div>
+                      <div className="text-xs muted">{student.email || "no email"}</div>
+                    </td>
+                    <td className="py-2 pr-4">{student.credits}</td>
+                    <td className="py-2 pr-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(student.owned_courses ?? []).slice(0, 3).map((course) => (
+                          <span key={course} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs">
+                            {course}
+                          </span>
+                        ))}
+                        {(student.owned_courses ?? []).length === 0 && <span className="text-xs muted">None</span>}
+                        {(student.owned_courses ?? []).length > 3 && (
+                          <span className="text-xs muted">+{(student.owned_courses ?? []).length - 3} more</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-0">
+                      <button
+                        type="button"
+                        className="btn btn-secondary px-3 py-1 text-xs"
+                        onClick={() => setSelectedStudentId(student.user_id)}
+                      >
+                        Manage
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {students.length === 0 && (
+                  <tr>
+                    <td className="py-3 text-sm muted" colSpan={4}>No students found.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="surface p-5">
+          <h2 className="text-lg font-semibold">Wallet Detail</h2>
+          {!walletDetail && <p className="mt-3 text-sm muted">Select a student from the left table.</p>}
+          {walletDetail && (
+            <>
+              <p className="mt-2 text-sm">
+                Student: <strong>{walletDetail.student.username}</strong> | Balance: <strong>{walletDetail.wallet.balance_credits}</strong>
+              </p>
+              <form onSubmit={adjustCredits} className="mt-3 grid gap-2">
+                <input
+                  type="number"
+                  className="input"
+                  placeholder="Amount (+add / -deduct)"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  required
+                />
+                <input
+                  className="input"
+                  placeholder="Note (optional)"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                />
+                <button className="btn btn-primary" disabled={loading}>
+                  {loading ? "Saving..." : "Apply Credit Adjustment"}
+                </button>
+              </form>
+
+              <h3 className="mt-5 text-sm font-semibold">Recent Transactions</h3>
+              <div className="mt-2 max-h-64 overflow-y-auto rounded border border-slate-200">
+                <ul className="divide-y divide-slate-200 text-sm">
+                  {walletDetail.transactions.map((tx) => (
+                    <li key={tx.id} className="p-3">
+                      <div className="flex items-center justify-between">
+                        <span className={tx.amount >= 0 ? "text-emerald-600" : "text-red-600"}>
+                          {tx.amount >= 0 ? `+${tx.amount}` : tx.amount}
+                        </span>
+                        <span className="text-xs muted">After: {tx.balance_after}</span>
+                      </div>
+                      <p className="text-xs muted">
+                        {tx.kind} {tx.course_title ? `| ${tx.course_title}` : ""} {tx.note ? `| ${tx.note}` : ""}
+                      </p>
+                    </li>
+                  ))}
+                  {walletDetail.transactions.length === 0 && <li className="p-3 text-xs muted">No transactions yet.</li>}
+                </ul>
+              </div>
+
+              <h3 className="mt-5 text-sm font-semibold">Owned Courses</h3>
+              <div className="mt-2 max-h-40 overflow-y-auto rounded border border-slate-200 p-2">
+                <ul className="space-y-1 text-sm">
+                  {walletDetail.enrollments.map((enrollment) => (
+                    <li key={enrollment.id} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
+                      <span>{enrollment.course.title}</span>
+                      <span className="text-xs muted">{enrollment.status}</span>
+                    </li>
+                  ))}
+                  {walletDetail.enrollments.length === 0 && <li className="text-xs muted">No enrolled courses.</li>}
+                </ul>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}

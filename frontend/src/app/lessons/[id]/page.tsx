@@ -33,6 +33,10 @@ type ProgressPayload = {
 type CourseLessonsPayload = {
   lessons: Array<{ id: number }>;
 };
+type ExamEligibility = {
+  can_take_final_exam: boolean;
+  final_exam_exists?: boolean;
+};
 
 export default function LessonPage() {
   const router = useRouter();
@@ -46,6 +50,7 @@ export default function LessonPage() {
   const [status, setStatus] = useState("Loading...");
   const [error, setError] = useState("");
   const [watchPercent, setWatchPercent] = useState(0);
+  const [examEligibility, setExamEligibility] = useState<ExamEligibility | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const deviceIdRef = useRef<string>("");
   const progressKey = useMemo(() => `lesson-progress-${lessonId}`, [lessonId]);
@@ -86,6 +91,18 @@ export default function LessonPage() {
 
   const markCompleted = async () => {
     await syncProgress(true);
+    if (lesson && accessToken) {
+      try {
+        const eligibility = await apiFetch<ExamEligibility>(
+          `/courses/${lesson.course_id}/exam-eligibility/`,
+          {},
+          accessToken,
+        );
+        setExamEligibility(eligibility);
+      } catch {
+        setExamEligibility(null);
+      }
+    }
   };
 
   useEffect(() => {
@@ -122,6 +139,13 @@ export default function LessonPage() {
       .catch(() => {
         setNextLessonId(null);
       });
+  }, [lesson, accessToken]);
+
+  useEffect(() => {
+    if (!lesson || !accessToken) return;
+    apiFetch<ExamEligibility>(`/courses/${lesson.course_id}/exam-eligibility/`, {}, accessToken)
+      .then(setExamEligibility)
+      .catch(() => setExamEligibility(null));
   }, [lesson, accessToken]);
 
   useEffect(() => {
@@ -327,14 +351,14 @@ export default function LessonPage() {
   }, [lesson, accessToken, getEffectiveDuration, persistLocalProgress, syncProgress]);
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-4 py-8">
-      {!accessToken && !getAccessToken() && <p className="text-sm text-slate-600">Redirecting to login...</p>}
-      {lesson && <h1 className="text-2xl font-semibold">{lesson.title}</h1>}
-      <p className="mt-2 text-sm text-slate-600">{lesson?.content_type === "READING" ? "Reading lesson" : status}</p>
-      {error && <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+    <main className="page-wrap fade-up">
+      {!accessToken && !getAccessToken() && <p className="text-sm muted">Redirecting to login...</p>}
+      {lesson && <h1 className="text-2xl font-semibold md:text-3xl">{lesson.title}</h1>}
+      <p className="mt-2 text-sm muted">{lesson?.content_type === "READING" ? "Reading lesson" : status}</p>
+      {error && <p className="mt-3 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
       {lesson?.content_type === "VIDEO" ? (
         <div className="mt-5">
-          <div className="overflow-hidden rounded-xl border border-slate-300 bg-black">
+          <div className="surface overflow-hidden bg-black">
             <video
               ref={videoRef}
               controls
@@ -346,31 +370,43 @@ export default function LessonPage() {
             />
           </div>
           <div className="mt-3">
-            <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+            <div className="mb-1 flex items-center justify-between text-xs muted">
               <span>Lesson progress</span>
               <span>{watchPercent}%</span>
             </div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-              <div className="h-full bg-emerald-600 transition-all" style={{ width: `${watchPercent}%` }} />
+            <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: "color-mix(in srgb, var(--border) 70%, transparent)" }}>
+              <div className="h-full transition-all" style={{ width: `${watchPercent}%`, background: "var(--accent)" }} />
             </div>
           </div>
         </div>
       ) : (
-        <article className="prose mt-5 max-w-none rounded-xl border border-slate-200 bg-white p-5">
-          <div className="whitespace-pre-wrap text-slate-800">{lesson?.reading_content || "No reading content yet."}</div>
+        <article className="surface prose mt-5 max-w-none p-5">
+          <div className="whitespace-pre-wrap">{lesson?.reading_content || "No reading content yet."}</div>
         </article>
       )}
       {lesson && lesson.has_quiz ? (
         <Link
           href={`/lessons/${lesson.id}/quiz`}
-          className="mt-4 inline-block rounded-md bg-amber-700 px-4 py-2 text-sm font-medium text-white"
+          className="btn btn-primary mt-4"
         >
           Take Lesson Quiz
         </Link>
+      ) : !nextLessonId && examEligibility?.can_take_final_exam ? (
+        <button
+          type="button"
+          className="btn btn-primary mt-4"
+          onClick={() => {
+            if (lesson) {
+              router.push(`/final-exam/${lesson.course_id}`);
+            }
+          }}
+        >
+          Take Final Exam
+        </button>
       ) : (
         <button
           type="button"
-          className="mt-4 inline-block rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn btn-secondary mt-4 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={!nextLessonId}
           onClick={() => {
             if (nextLessonId) router.push(`/lessons/${nextLessonId}`);
@@ -379,6 +415,11 @@ export default function LessonPage() {
         >
           {nextLessonId ? "Next Lesson" : "Back to Dashboard"}
         </button>
+      )}
+      {!nextLessonId && !lesson?.has_quiz && examEligibility && !examEligibility.can_take_final_exam && (
+        <p className="mt-2 text-xs muted">
+          Final exam is still locked or not published yet.
+        </p>
       )}
     </main>
   );

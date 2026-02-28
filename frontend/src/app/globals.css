@@ -1,11 +1,35 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f8fafc;
+  --background: #f4f6fb;
   --foreground: #0f172a;
   --surface: #ffffff;
-  --surface-soft: #e2e8f0;
-  --accent: #b45309;
+  --surface-soft: #eef2ff;
+  --border: #dbe4f0;
+  --muted: #5b6778;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --danger: #b91c1c;
+  --ring: rgba(15, 118, 110, 0.35);
+  --hero-glow-a: rgba(15, 118, 110, 0.2);
+  --hero-glow-b: rgba(29, 78, 216, 0.14);
+  --bg-base: linear-gradient(180deg, #f4f6fb 0%, #eef3fb 100%);
+}
+
+[data-theme="dark"] {
+  --background: #0b1220;
+  --foreground: #e5ecf7;
+  --surface: #111a2b;
+  --surface-soft: #1b273d;
+  --border: #2a3955;
+  --muted: #98a7c0;
+  --accent: #14b8a6;
+  --accent-strong: #0d9488;
+  --danger: #ef4444;
+  --ring: rgba(20, 184, 166, 0.45);
+  --hero-glow-a: rgba(20, 184, 166, 0.22);
+  --hero-glow-b: rgba(56, 189, 248, 0.16);
+  --bg-base: linear-gradient(180deg, #080f1c 0%, #0b1220 100%);
 }
 
 @theme inline {
@@ -15,8 +39,146 @@
   --font-serif: var(--font-source-serif);
 }
 
+html,
+body {
+  min-height: 100%;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-space-grotesk), sans-serif;
+  min-height: 100dvh;
+  position: relative;
+  isolation: isolate;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1200px 700px at 0% -10%, var(--hero-glow-a), transparent 55%),
+    radial-gradient(900px 600px at 100% 0%, var(--hero-glow-b), transparent 60%),
+    var(--bg-base);
+  background-repeat: no-repeat, no-repeat, no-repeat;
+  background-size: 120% 80%, 90% 70%, 100% 100%;
+  background-position: left top, right top, center;
+}
+
+* {
+  border-color: var(--border);
+}
+
+.page-wrap {
+  @apply mx-auto w-full max-w-6xl px-4 py-8;
+}
+
+.surface {
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  @apply rounded-2xl shadow-sm;
+}
+
+.surface-soft {
+  background: color-mix(in srgb, var(--surface-soft) 88%, transparent);
+  border: 1px solid var(--border);
+  @apply rounded-xl;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.btn {
+  @apply inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold transition-all duration-200;
+}
+
+.btn:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--surface-soft);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-danger:hover {
+  filter: brightness(0.95);
+  transform: translateY(-1px);
+}
+
+.input {
+  @apply mt-1 w-full rounded-lg border px-3 py-2.5 text-sm transition-all duration-200;
+  background: var(--surface);
+  color: var(--foreground);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.fade-up {
+  animation: fadeUp 380ms ease-out both;
+}
+
+.fade-up-delay {
+  animation: fadeUp 520ms ease-out both;
+}
+
+.soft-pulse {
+  animation: softPulse 2.2s ease-in-out infinite;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes softPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(15, 118, 110, 0.1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-up,
+  .fade-up-delay,
+  .soft-pulse {
+    animation: none !important;
+  }
 }

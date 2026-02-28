@@ -12,6 +12,7 @@ type Course = {
   slug: string;
   description: string;
   level: string;
+  price_cents?: number;
   is_published: boolean;
   enrollment_count?: number;
 };
@@ -78,21 +79,48 @@ type QuizQuestionForm = {
   choices: QuizChoiceForm[];
 };
 
+type FinalExamChoiceForm = { text: string; is_correct: boolean; order: number };
+type FinalExamQuestionForm = {
+  id?: number;
+  prompt: string;
+  order: number;
+  choices: FinalExamChoiceForm[];
+};
+type FinalExamPayload = {
+  id: number;
+  course_id: number;
+  title: string;
+  passing_score: number;
+  time_limit_sec: number | null;
+  is_published: boolean;
+  questions: Array<{
+    id: number;
+    prompt: string;
+    order: number;
+    choices: Array<{ id: number; text: string; order: number; is_correct?: boolean }>;
+  }>;
+};
+
 type FeedbackTarget =
   | "global"
   | "step1-course"
   | "step2-lesson"
   | "step3-upload"
   | "step4-quiz"
+  | "step5-final-exam"
+  | "manage-final-exam"
   | "manage-course"
   | "manage-lesson"
   | "manage-quiz";
+
+type AdminView = "build" | "manage" | "insights";
 
 export default function AdminUiPage() {
   const router = useRouter();
   const pathname = usePathname();
   const accessToken = useAccessToken();
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  const [activeView, setActiveView] = useState<AdminView>("build");
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<{
     target: FeedbackTarget;
@@ -121,6 +149,7 @@ export default function AdminUiPage() {
     slug: "",
     description: "",
     level: "Beginner",
+    price_cents: 0,
     is_published: true,
   });
 
@@ -155,6 +184,7 @@ export default function AdminUiPage() {
     slug: "",
     level: "",
     description: "",
+    price_cents: 0,
     is_published: false,
   });
   const [editLessonForm, setEditLessonForm] = useState({
@@ -170,6 +200,23 @@ export default function AdminUiPage() {
     passing_score: 70,
     time_limit_sec: "",
   });
+  const [finalExamForm, setFinalExamForm] = useState({
+    title: "Final Exam",
+    passing_score: 70,
+    time_limit_sec: "",
+    is_published: false,
+    questions: [
+      {
+        prompt: "",
+        order: 1,
+        choices: [
+          { text: "", is_correct: true, order: 1 },
+          { text: "", is_correct: false, order: 2 },
+        ],
+      },
+    ] as FinalExamQuestionForm[],
+  });
+  const [finalExamExists, setFinalExamExists] = useState(false);
 
   const selectedCourseSections = useMemo(
     () => sections.filter((section) => section.course_id === selectedCourseId),
@@ -178,6 +225,63 @@ export default function AdminUiPage() {
   const selectedCourseLessons = useMemo(
     () => lessons.filter((lesson) => lesson.course_id === selectedCourseId),
     [lessons, selectedCourseId],
+  );
+  const hasUploadedVideo = useMemo(
+    () => lessons.some((lesson) => Boolean(lesson.hls_master_path)),
+    [lessons],
+  );
+  const workflowStatus = useMemo(
+    () => ({
+      step1: courses.length > 0,
+      step2: lessons.length > 0,
+      step3: hasUploadedVideo,
+      step4: quizzes.length > 0,
+      step5: finalExamExists,
+    }),
+    [courses.length, finalExamExists, hasUploadedVideo, lessons.length, quizzes.length],
+  );
+
+  const loadFinalExamForCourse = useCallback(
+    async (courseId: number) => {
+      if (!accessToken) return;
+      const exam = await apiFetch<FinalExamPayload>(`/admin/courses/${courseId}/final-exam/`, {}, accessToken);
+      setFinalExamExists(true);
+      setFinalExamForm({
+        title: exam.title || "Final Exam",
+        passing_score: exam.passing_score ?? 70,
+        time_limit_sec: exam.time_limit_sec ? String(exam.time_limit_sec) : "",
+        is_published: Boolean(exam.is_published),
+        questions:
+          exam.questions.length > 0
+            ? exam.questions.map((question, qIndex) => ({
+                id: question.id,
+                prompt: question.prompt,
+                order: question.order || qIndex + 1,
+                choices:
+                  question.choices.length > 0
+                    ? question.choices.map((choice, cIndex) => ({
+                        text: choice.text,
+                        is_correct: Boolean(choice.is_correct),
+                        order: choice.order || cIndex + 1,
+                      }))
+                    : [
+                        { text: "", is_correct: true, order: 1 },
+                        { text: "", is_correct: false, order: 2 },
+                      ],
+              }))
+            : [
+                {
+                  prompt: "",
+                  order: 1,
+                  choices: [
+                    { text: "", is_correct: true, order: 1 },
+                    { text: "", is_correct: false, order: 2 },
+                  ],
+                },
+              ],
+      });
+    },
+    [accessToken],
   );
 
   const renderFeedback = (target: FeedbackTarget) => {
@@ -249,6 +353,58 @@ export default function AdminUiPage() {
       .catch(() => setSections([]));
   }, [accessToken, isAdmin, selectedCourseId]);
 
+  useEffect(() => {
+    if (!accessToken || selectedCourseId == null || isAdmin !== true) {
+      setFinalExamExists(false);
+      setFinalExamForm({
+        title: "Final Exam",
+        passing_score: 70,
+        time_limit_sec: "",
+        is_published: false,
+        questions: [
+          {
+            prompt: "",
+            order: 1,
+            choices: [
+              { text: "", is_correct: true, order: 1 },
+              { text: "", is_correct: false, order: 2 },
+            ],
+          },
+        ],
+      });
+      return;
+    }
+
+    loadFinalExamForCourse(selectedCourseId)
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) {
+          setFinalExamExists(false);
+          setFinalExamForm({
+            title: "Final Exam",
+            passing_score: 70,
+            time_limit_sec: "",
+            is_published: false,
+            questions: [
+              {
+                prompt: "",
+                order: 1,
+                choices: [
+                  { text: "", is_correct: true, order: 1 },
+                  { text: "", is_correct: false, order: 2 },
+                ],
+              },
+            ],
+          });
+          return;
+        }
+        setFeedback({
+          target: "step5-final-exam",
+          type: "error",
+          message: err instanceof ApiError ? err.message : "Failed to load final exam for selected course.",
+        });
+      });
+  }, [accessToken, isAdmin, loadFinalExamForCourse, selectedCourseId]);
+
   const runAction = async (action: () => Promise<void>, successMessage: string, target: FeedbackTarget) => {
     setLoading(true);
     setFeedback(null);
@@ -270,11 +426,11 @@ export default function AdminUiPage() {
       async () => {
         const created = await apiFetch<Course>(
           "/admin/courses/",
-          { method: "POST", body: JSON.stringify({ ...courseForm, price_cents: 0 }) },
+          { method: "POST", body: JSON.stringify(courseForm) },
           accessToken,
         );
         setSelectedCourseId(created.id);
-        setCourseForm({ title: "", slug: "", description: "", level: "Beginner", is_published: true });
+        setCourseForm({ title: "", slug: "", description: "", level: "Beginner", price_cents: 0, is_published: true });
       },
       "Course created. Continue with Step 2.",
       "step1-course",
@@ -480,6 +636,7 @@ export default function AdminUiPage() {
               slug: editCourseForm.slug,
               level: editCourseForm.level,
               description: editCourseForm.description,
+              price_cents: editCourseForm.price_cents,
               is_published: editCourseForm.is_published,
             }),
           },
@@ -497,7 +654,7 @@ export default function AdminUiPage() {
     await runAction(
       async () => {
         await apiFetch(`/admin/courses/${editCourseForm.id}/`, { method: "DELETE" }, accessToken);
-        setEditCourseForm({ id: "", title: "", slug: "", level: "", description: "", is_published: false });
+        setEditCourseForm({ id: "", title: "", slug: "", level: "", description: "", price_cents: 0, is_published: false });
       },
       "Course deleted.",
       "manage-course",
@@ -577,19 +734,235 @@ export default function AdminUiPage() {
     );
   };
 
+  const addFinalExamQuestion = () => {
+    setFinalExamForm((prev) => ({
+      ...prev,
+      questions: [
+        ...prev.questions,
+        {
+          prompt: "",
+          order: prev.questions.length + 1,
+          choices: [
+            { text: "", is_correct: true, order: 1 },
+            { text: "", is_correct: false, order: 2 },
+          ],
+        },
+      ],
+    }));
+  };
+
+  const updateFinalExamQuestion = (index: number, patch: Partial<FinalExamQuestionForm>) => {
+    setFinalExamForm((prev) => {
+      const next = [...prev.questions];
+      next[index] = { ...next[index], ...patch };
+      return { ...prev, questions: next };
+    });
+  };
+
+  const updateFinalExamChoice = (qIndex: number, cIndex: number, patch: Partial<FinalExamChoiceForm>) => {
+    setFinalExamForm((prev) => {
+      const nextQuestions = [...prev.questions];
+      const choices = [...nextQuestions[qIndex].choices];
+      choices[cIndex] = { ...choices[cIndex], ...patch };
+      nextQuestions[qIndex] = { ...nextQuestions[qIndex], choices };
+      return { ...prev, questions: nextQuestions };
+    });
+  };
+
+  const addFinalExamChoice = (qIndex: number) => {
+    setFinalExamForm((prev) => {
+      const nextQuestions = [...prev.questions];
+      nextQuestions[qIndex] = {
+        ...nextQuestions[qIndex],
+        choices: [
+          ...nextQuestions[qIndex].choices,
+          { text: "", is_correct: false, order: nextQuestions[qIndex].choices.length + 1 },
+        ],
+      };
+      return { ...prev, questions: nextQuestions };
+    });
+  };
+
+  const saveFinalExam = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!accessToken || !selectedCourseId) return;
+
+    const validQuestions = finalExamForm.questions.every((question) => {
+      const hasCorrect = question.choices.some((choice) => choice.is_correct);
+      const hasMinChoices = question.choices.length >= 2;
+      return hasCorrect && hasMinChoices;
+    });
+    if (!validQuestions) {
+      setFeedback({
+        target: "step5-final-exam",
+        type: "error",
+        message: "Each final exam question needs at least 2 choices and one correct answer.",
+      });
+      return;
+    }
+
+    await runAction(
+      async () => {
+        const payload = {
+          title: finalExamForm.title,
+          passing_score: finalExamForm.passing_score,
+          time_limit_sec: finalExamForm.time_limit_sec ? Number(finalExamForm.time_limit_sec) : null,
+          is_published: finalExamForm.is_published,
+          questions: finalExamForm.questions.map((question, qIndex) => ({
+            prompt: question.prompt,
+            order: qIndex + 1,
+            choices: question.choices.map((choice, cIndex) => ({
+              text: choice.text,
+              is_correct: choice.is_correct,
+              order: cIndex + 1,
+            })),
+          })),
+        };
+        const saved = await apiFetch<FinalExamPayload>(
+          `/admin/courses/${selectedCourseId}/final-exam/`,
+          { method: "PUT", body: JSON.stringify(payload) },
+          accessToken,
+        );
+        setFinalExamExists(true);
+        setFinalExamForm({
+          title: saved.title,
+          passing_score: saved.passing_score ?? 70,
+          time_limit_sec: saved.time_limit_sec ? String(saved.time_limit_sec) : "",
+          is_published: Boolean(saved.is_published),
+          questions: saved.questions.map((question, qIndex) => ({
+            id: question.id,
+            prompt: question.prompt,
+            order: question.order || qIndex + 1,
+            choices: question.choices.map((choice, cIndex) => ({
+              text: choice.text,
+              is_correct: Boolean(choice.is_correct),
+              order: choice.order || cIndex + 1,
+            })),
+          })),
+        });
+      },
+      finalExamExists ? "Final exam updated." : "Final exam created.",
+      "step5-final-exam",
+    );
+  };
+
+  const unpublishFinalExam = async () => {
+    if (!accessToken || !selectedCourseId || !finalExamExists) return;
+    await runAction(
+      async () => {
+        await apiFetch(
+          `/admin/courses/${selectedCourseId}/final-exam/publish/`,
+          { method: "PATCH", body: JSON.stringify({ is_published: false }) },
+          accessToken,
+        );
+        await loadFinalExamForCourse(selectedCourseId);
+      },
+      "Final exam unpublished.",
+      "manage-final-exam",
+    );
+  };
+
+  const resetFinalExam = async () => {
+    if (!accessToken || !selectedCourseId || !finalExamExists) return;
+    if (!window.confirm("Reset final exam? This removes all final exam questions and unpublishes it.")) return;
+    await runAction(
+      async () => {
+        await apiFetch(`/admin/courses/${selectedCourseId}/final-exam/reset/`, { method: "POST" }, accessToken);
+        await loadFinalExamForCourse(selectedCourseId);
+      },
+      "Final exam reset. Questions removed and exam unpublished.",
+      "manage-final-exam",
+    );
+  };
+
+  const quickDeleteFinalExamQuestion = async (questionId?: number) => {
+    if (!accessToken || !selectedCourseId || !finalExamExists || !questionId) return;
+    if (!window.confirm("Delete this final exam question?")) return;
+    await runAction(
+      async () => {
+        await apiFetch(`/admin/final-exam/questions/${questionId}/`, { method: "DELETE" }, accessToken);
+        await loadFinalExamForCourse(selectedCourseId);
+      },
+      "Final exam question deleted.",
+      "manage-final-exam",
+    );
+  };
+
   if (isAdmin === null) {
     return <main className="mx-auto w-full max-w-6xl px-4 py-8">Checking access...</main>;
   }
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8">
-      <h1 className="text-3xl font-semibold">Teacher Course Builder</h1>
-      <p className="mt-2 text-sm text-slate-600">
-        Follow the steps in order: 1) Course 2) Lesson 3) Video 4) Quiz
-      </p>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Admin Control Center</h1>
+            <p className="mt-2 text-sm text-slate-600">
+              Build course content, manage existing content, and monitor performance from one place.
+            </p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => setActiveView("build")}
+              className={`rounded-lg px-3 py-2 text-sm font-medium ${activeView === "build" ? "bg-slate-900 text-white" : "border border-slate-300 bg-white"}`}
+            >
+              Build
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveView("manage")}
+              className={`rounded-lg px-3 py-2 text-sm font-medium ${activeView === "manage" ? "bg-slate-900 text-white" : "border border-slate-300 bg-white"}`}
+            >
+              Manage
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveView("insights")}
+              className={`rounded-lg px-3 py-2 text-sm font-medium ${activeView === "insights" ? "bg-slate-900 text-white" : "border border-slate-300 bg-white"}`}
+            >
+              Insights
+            </button>
+          </div>
+        </div>
+        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-600">Working Course</p>
+          <select
+            className="w-full rounded border px-3 py-2 text-sm"
+            value={selectedCourseId ?? ""}
+            onChange={(e) => setSelectedCourseId(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">Select course</option>
+            {courses.map((course) => (
+              <option key={course.id} value={course.id}>
+                {course.title}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
       {renderFeedback("global")}
 
-      {insights && (
+      <section className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm">Courses<br /><strong>{courses.length}</strong></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm">Lessons<br /><strong>{lessons.length}</strong></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm">Quizzes<br /><strong>{quizzes.length}</strong></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm">Final Exam<br /><strong>{selectedCourseId && finalExamExists ? "Ready" : "Not Set"}</strong></div>
+        <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm">
+          Workflow
+          <div className="mt-1 flex flex-wrap gap-1 text-[11px]">
+            <span className={`rounded px-2 py-0.5 ${workflowStatus.step1 ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>1</span>
+            <span className={`rounded px-2 py-0.5 ${workflowStatus.step2 ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>2</span>
+            <span className={`rounded px-2 py-0.5 ${workflowStatus.step3 ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>3</span>
+            <span className={`rounded px-2 py-0.5 ${workflowStatus.step4 ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>4</span>
+            <span className={`rounded px-2 py-0.5 ${workflowStatus.step5 ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>5</span>
+          </div>
+        </div>
+      </section>
+
+      {activeView === "insights" && insights && (
         <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Course Insights</h2>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -637,12 +1010,13 @@ export default function AdminUiPage() {
         </section>
       )}
 
-      <section className="mt-6 grid gap-4 lg:grid-cols-2">
+      {activeView === "build" && <section className="mt-6 grid gap-4 lg:grid-cols-2">
         <form onSubmit={createCourse} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Step 1: Create Course</h2>
           <input className="mt-3 w-full rounded border px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(e) => setCourseForm((v) => ({ ...v, title: e.target.value }))} required />
           <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Course slug (example: python-basics)" value={courseForm.slug} onChange={(e) => setCourseForm((v) => ({ ...v, slug: e.target.value }))} required />
           <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Level (Beginner/Intermediate)" value={courseForm.level} onChange={(e) => setCourseForm((v) => ({ ...v, level: e.target.value }))} />
+          <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
           <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
           <label className="mt-2 flex items-center gap-2 text-sm">
             <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
@@ -653,20 +1027,29 @@ export default function AdminUiPage() {
         </form>
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Choose Working Course</h2>
-          <select
-            className="mt-3 w-full rounded border px-3 py-2"
-            value={selectedCourseId ?? ""}
-            onChange={(e) => setSelectedCourseId(e.target.value ? Number(e.target.value) : null)}
-          >
-            <option value="">Select course</option>
-            {courses.map((course) => (
-              <option key={course.id} value={course.id}>
-                {course.title}
-              </option>
-            ))}
-          </select>
-          <p className="mt-2 text-xs text-slate-500">All next steps use this selected course.</p>
+          <h2 className="text-lg font-semibold">Build Workflow Checklist</h2>
+          <ul className="mt-3 space-y-2 text-sm">
+            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+              <span>1. Create course</span>
+              <span className={workflowStatus.step1 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step1 ? "Done" : "Pending"}</span>
+            </li>
+            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+              <span>2. Add lessons</span>
+              <span className={workflowStatus.step2 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step2 ? "Done" : "Pending"}</span>
+            </li>
+            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+              <span>3. Upload video</span>
+              <span className={workflowStatus.step3 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step3 ? "Done" : "Pending"}</span>
+            </li>
+            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+              <span>4. Build lesson quiz</span>
+              <span className={workflowStatus.step4 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step4 ? "Done" : "Pending"}</span>
+            </li>
+            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+              <span>5. Build final exam</span>
+              <span className={workflowStatus.step5 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step5 ? "Done" : "Pending"}</span>
+            </li>
+          </ul>
         </div>
 
         <form onSubmit={createLesson} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -821,16 +1204,115 @@ export default function AdminUiPage() {
           </div>
           {renderFeedback("step4-quiz")}
         </form>
-      </section>
 
-      <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form onSubmit={saveFinalExam} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
+          <h2 className="text-lg font-semibold">Step 5: Build Final Exam (Course Level)</h2>
+          <p className="mt-2 text-xs text-slate-500">
+            This is the end-of-course exam. Students can take it only after all lessons + lesson quizzes are completed.
+          </p>
+          {selectedCourseId == null ? (
+            <p className="mt-3 rounded bg-amber-50 p-3 text-sm text-amber-700">
+              Select a working course first.
+            </p>
+          ) : (
+            <>
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                <input
+                  className="w-full rounded border px-3 py-2"
+                  value={finalExamForm.title}
+                  onChange={(e) => setFinalExamForm((v) => ({ ...v, title: e.target.value }))}
+                  placeholder="Final exam title"
+                  required
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className="w-full rounded border px-3 py-2"
+                  value={finalExamForm.passing_score}
+                  onChange={(e) => setFinalExamForm((v) => ({ ...v, passing_score: Number(e.target.value) }))}
+                  placeholder="Passing score"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  className="w-full rounded border px-3 py-2"
+                  value={finalExamForm.time_limit_sec}
+                  onChange={(e) => setFinalExamForm((v) => ({ ...v, time_limit_sec: e.target.value }))}
+                  placeholder="Time limit in sec (optional)"
+                />
+              </div>
+              <label className="mt-2 flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={finalExamForm.is_published}
+                  onChange={(e) => setFinalExamForm((v) => ({ ...v, is_published: e.target.checked }))}
+                />
+                Publish final exam
+              </label>
+
+              <div className="mt-4 space-y-3">
+                {finalExamForm.questions.map((question, qIndex) => (
+                  <div key={qIndex} className="rounded-lg border border-slate-200 p-3">
+                    <input
+                      className="w-full rounded border px-3 py-2"
+                      placeholder={`Final exam question ${qIndex + 1}`}
+                      value={question.prompt}
+                      onChange={(e) => updateFinalExamQuestion(qIndex, { prompt: e.target.value })}
+                    />
+                    <div className="mt-2 space-y-2">
+                      {question.choices.map((choice, cIndex) => (
+                        <div key={cIndex} className="flex items-center gap-2">
+                          <input
+                            className="flex-1 rounded border px-3 py-2"
+                            placeholder={`Choice ${cIndex + 1}`}
+                            value={choice.text}
+                            onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { text: e.target.value })}
+                          />
+                          <label className="flex items-center gap-1 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={choice.is_correct}
+                              onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { is_correct: e.target.checked })}
+                            />
+                            Correct
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => addFinalExamChoice(qIndex)}
+                      className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs"
+                    >
+                      + Add Choice
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={addFinalExamQuestion} className="rounded border border-slate-300 px-3 py-1.5 text-sm">
+                  + Add Question
+                </button>
+                <button disabled={loading || selectedCourseId == null} className="rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60">
+                  {finalExamExists ? "Update Final Exam" : "Create Final Exam"}
+                </button>
+              </div>
+            </>
+          )}
+          {renderFeedback("step5-final-exam")}
+        </form>
+
+      </section>}
+
+      {(activeView === "build" || activeView === "manage") && <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold">Current Content Summary</h2>
         <p className="mt-2 text-sm text-slate-600">
-          Courses: {courses.length} | Lessons: {lessons.length} | Quizzes: {quizzes.length}
+          Courses: {courses.length} | Lessons: {lessons.length} | Quizzes: {quizzes.length} | Final Exam: {selectedCourseId && finalExamExists ? "Configured" : "Not Configured"}
         </p>
-      </section>
+      </section>}
 
-      <section className="mt-6 grid gap-4 lg:grid-cols-2">
+      {activeView === "manage" && <section className="mt-6 grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Manage Course + Enrollments</h2>
           <select
@@ -846,6 +1328,7 @@ export default function AdminUiPage() {
                 slug: course.slug,
                 level: course.level,
                 description: course.description,
+                price_cents: course.price_cents ?? 0,
                 is_published: Boolean(course.is_published),
               });
             }}
@@ -863,6 +1346,7 @@ export default function AdminUiPage() {
                 <input className="w-full rounded border px-3 py-2" value={editCourseForm.title} onChange={(e) => setEditCourseForm((v) => ({ ...v, title: e.target.value }))} />
                 <input className="w-full rounded border px-3 py-2" value={editCourseForm.slug} onChange={(e) => setEditCourseForm((v) => ({ ...v, slug: e.target.value }))} />
                 <input className="w-full rounded border px-3 py-2" value={editCourseForm.level} onChange={(e) => setEditCourseForm((v) => ({ ...v, level: e.target.value }))} />
+                <input type="number" min={0} className="w-full rounded border px-3 py-2" value={editCourseForm.price_cents} onChange={(e) => setEditCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} placeholder="Required credits to enroll" />
                 <textarea className="w-full rounded border px-3 py-2" value={editCourseForm.description} onChange={(e) => setEditCourseForm((v) => ({ ...v, description: e.target.value }))} />
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={editCourseForm.is_published} onChange={(e) => setEditCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
@@ -990,7 +1474,51 @@ export default function AdminUiPage() {
             </>
           )}
         </div>
-      </section>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
+          <h2 className="text-lg font-semibold">Manage Final Exam (Quick Actions)</h2>
+          <p className="mt-2 text-xs text-slate-500">
+            Unpublish, reset question bank, or delete questions one by one.
+          </p>
+          {selectedCourseId == null ? (
+            <p className="mt-3 rounded bg-amber-50 p-3 text-sm text-amber-700">Select a working course first.</p>
+          ) : !finalExamExists ? (
+            <p className="mt-3 rounded bg-slate-50 p-3 text-sm text-slate-600">
+              No final exam configured yet for this course. Use Build view Step 5 first.
+            </p>
+          ) : (
+            <>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={unpublishFinalExam} className="rounded border border-slate-300 px-3 py-2 text-sm">
+                  Unpublish Final Exam
+                </button>
+                <button type="button" onClick={resetFinalExam} className="rounded bg-red-700 px-3 py-2 text-sm text-white">
+                  Reset Question Bank
+                </button>
+              </div>
+              <div className="mt-4 space-y-2">
+                {finalExamForm.questions.map((question, index) => (
+                  <div key={`manage-${question.id ?? "new"}-${index}`} className="flex items-start justify-between gap-3 rounded border border-slate-200 bg-slate-50 p-3">
+                    <div>
+                      <p className="text-sm font-medium">{index + 1}. {question.prompt || "(No question text yet)"}</p>
+                      <p className="text-xs text-slate-500">Choices: {question.choices.length}</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!question.id}
+                      onClick={() => quickDeleteFinalExamQuestion(question.id)}
+                      className="rounded border border-red-300 px-3 py-1.5 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Delete Question
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {renderFeedback("manage-final-exam")}
+        </div>
+      </section>}
     </main>
   );
 }

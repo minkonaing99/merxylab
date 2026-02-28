@@ -30,50 +30,52 @@ export default function HomePage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#ffedd5,_transparent_40%),linear-gradient(#f8fafc,_#f1f5f9)] text-slate-900">
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10">
-        <section className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-          <p className="text-xs uppercase tracking-[0.2em] text-amber-700">MerxyLab</p>
-          <h1 className="mt-2 text-4xl font-semibold tracking-tight">Learn with protected streaming and quizzes</h1>
-          <p className="mt-3 text-sm text-slate-600">
+    <div className="min-h-screen">
+      <main className="page-wrap flex flex-col gap-8 py-10">
+        <section className="surface fade-up p-7 md:p-10">
+          <p className="text-xs uppercase tracking-[0.2em] muted">MerxyLab</p>
+          <h1 className="mt-2 text-4xl font-semibold tracking-tight md:text-5xl">
+            Minimal learning platform with secure streaming
+          </h1>
+          <p className="mt-3 text-sm muted">
             API: <code>{API_BASE_URL}</code> | Health: <strong>{health}</strong>
           </p>
           {!isAuthed ? (
             <div className="mt-6 flex flex-wrap items-center gap-3">
-              <Link href="/login" className="rounded-md bg-slate-900 px-5 py-2 text-sm font-medium text-white">
+              <Link href="/login" className="btn btn-primary soft-pulse">
                 Login First
               </Link>
-              <Link href="/register" className="rounded-md border border-slate-300 px-5 py-2 text-sm font-medium">
+              <Link href="/register" className="btn btn-secondary">
                 Create Account
               </Link>
             </div>
           ) : (
             <div className="mt-6">
-              <Link href="/dashboard" className="rounded-md bg-emerald-700 px-5 py-2 text-sm font-medium text-white">
+              <Link href="/dashboard" className="btn btn-primary">
                 Go to Dashboard
               </Link>
             </div>
           )}
         </section>
 
-        <section>
+        <section className="fade-up-delay">
           <h2 className="mb-4 text-2xl font-semibold">Course Catalog</h2>
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {courses.map((course) => (
-              <article key={course.id} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p className="mb-2 text-xs uppercase tracking-wide text-amber-700">{course.level || "General"}</p>
+              <article key={course.id} className="surface p-5 transition-transform duration-200 hover:-translate-y-1">
+                <p className="mb-2 text-xs uppercase tracking-wide muted">{course.level || "General"}</p>
                 <h3 className="text-xl font-semibold">{course.title}</h3>
-                <p className="mt-2 line-clamp-3 text-sm text-slate-600">{course.description}</p>
+                <p className="mt-2 line-clamp-3 text-sm muted">{course.description}</p>
                 <Link
                   href={`/courses/${course.slug}`}
-                  className="mt-4 inline-block rounded-md bg-amber-700 px-4 py-2 text-sm font-medium text-white"
+                  className="btn btn-primary mt-4"
                 >
                   View Course
                 </Link>
               </article>
             ))}
             {courses.length === 0 && (
-              <p className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">
+              <p className="surface p-6 text-sm muted">
                 No courses found.
               </p>
             )}

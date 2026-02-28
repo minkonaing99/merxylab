@@ -5,13 +5,21 @@ import { useRouter } from "next/navigation";
 import { clearTokens } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
 import { apiFetch } from "@/lib/api";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { getTheme, setTheme, subscribeThemeChange } from "@/lib/theme";
 
 export function TopNav() {
   const router = useRouter();
   const accessToken = useAccessToken();
   const isAuthed = Boolean(accessToken);
+  const isHydrated = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
+  const theme = useSyncExternalStore(subscribeThemeChange, getTheme, () => "light");
   const [role, setRole] = useState<string | null>(null);
+  const showAuthedNav = isHydrated && isAuthed;
 
   useEffect(() => {
     if (!accessToken) {
@@ -29,35 +37,54 @@ export function TopNav() {
   };
 
   return (
-    <header className="sticky top-0 z-10 border-b border-slate-200/70 bg-white/90 backdrop-blur-md">
+    <header className="sticky top-0 z-20 border-b backdrop-blur-md" style={{ background: "color-mix(in srgb, var(--surface) 86%, transparent)" }}>
       <nav className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3">
-        <Link href={isAuthed ? "/dashboard" : "/"} className="font-semibold tracking-tight text-slate-900">
+        <Link href={showAuthedNav ? "/dashboard" : "/"} className="font-semibold tracking-tight">
           MerxyLab
         </Link>
-        <div className="flex items-center gap-3 text-sm text-slate-700">
-          {!isAuthed ? (
+        <div className="flex items-center gap-2 text-sm">
+          <button
+            type="button"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            className="btn btn-secondary px-3 py-1.5 text-xs"
+            aria-label="Toggle dark mode"
+            title="Toggle dark mode"
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
+          {!showAuthedNav ? (
             <>
-              <Link className="rounded-md px-2 py-1 hover:bg-slate-100" href="/login">
+              <Link className="btn btn-secondary px-3 py-1.5 text-xs" href="/login">
                 Login
               </Link>
-              <Link className="rounded-md bg-amber-700 px-3 py-1.5 font-medium text-white" href="/register">
+              <Link className="btn btn-primary px-3 py-1.5 text-xs" href="/register">
                 Register
               </Link>
             </>
           ) : (
             <>
-              <Link className="rounded-md px-2 py-1 hover:bg-slate-100" href="/dashboard">
+              <Link className="btn btn-secondary px-3 py-1.5 text-xs" href="/dashboard">
                 Dashboard
               </Link>
-              {role === "admin" && (
-                <Link className="rounded-md px-2 py-1 hover:bg-slate-100" href="/admin-ui">
-                  Admin UI
+              {role !== "admin" && (
+                <Link className="btn btn-secondary px-3 py-1.5 text-xs" href="/profile">
+                  Profile
                 </Link>
+              )}
+              {role === "admin" && (
+                <>
+                  <Link className="btn btn-secondary px-3 py-1.5 text-xs" href="/admin-ui">
+                    Admin UI
+                  </Link>
+                  <Link className="btn btn-secondary px-3 py-1.5 text-xs" href="/admin-students">
+                    Students
+                  </Link>
+                </>
               )}
               <button
                 type="button"
                 onClick={handleLogout}
-                className="cursor-pointer rounded-md border border-slate-300 px-3 py-1.5"
+                className="btn btn-secondary cursor-pointer px-3 py-1.5 text-xs"
               >
                 Logout
               </button>

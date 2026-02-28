@@ -41,6 +41,9 @@ type LessonMeta = {
 type CourseLessonsPayload = {
   lessons: Array<{ id: number }>;
 };
+type ExamEligibility = {
+  can_take_final_exam: boolean;
+};
 
 export default function LessonQuizPage() {
   const router = useRouter();
@@ -52,6 +55,8 @@ export default function LessonQuizPage() {
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [result, setResult] = useState<AttemptResult | null>(null);
   const [nextLessonId, setNextLessonId] = useState<number | null>(null);
+  const [courseId, setCourseId] = useState<number | null>(null);
+  const [examEligibility, setExamEligibility] = useState<ExamEligibility | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(Boolean(accessToken));
 
@@ -68,6 +73,7 @@ export default function LessonQuizPage() {
     ])
       .then(async ([quizPayload, lessonMeta]) => {
         setQuiz(quizPayload);
+        setCourseId(lessonMeta.course_id);
         const courseLessons = await apiFetch<CourseLessonsPayload>(
           `/courses/${lessonMeta.course_id}/lessons/`,
           {},
@@ -76,6 +82,16 @@ export default function LessonQuizPage() {
         const ordered = courseLessons.lessons;
         const currentIdx = ordered.findIndex((lesson) => lesson.id === lessonId);
         setNextLessonId(currentIdx >= 0 && currentIdx < ordered.length - 1 ? ordered[currentIdx + 1].id : null);
+        try {
+          const eligibility = await apiFetch<ExamEligibility>(
+            `/courses/${lessonMeta.course_id}/exam-eligibility/`,
+            {},
+            token,
+          );
+          setExamEligibility(eligibility);
+        } catch {
+          setExamEligibility(null);
+        }
       })
       .catch((err) => {
         const message = err instanceof ApiError ? err.message : "Could not load quiz.";
@@ -126,25 +142,29 @@ export default function LessonQuizPage() {
       router.push(`/lessons/${nextLessonId}`);
       return;
     }
+    if (courseId && examEligibility?.can_take_final_exam) {
+      router.push(`/final-exam/${courseId}`);
+      return;
+    }
     router.push("/dashboard");
   };
 
   if (!accessToken && !getAccessToken()) {
-    return <main className="mx-auto w-full max-w-4xl px-4 py-8">Redirecting to login...</main>;
+    return <main className="page-wrap">Redirecting to login...</main>;
   }
 
   if (loading) {
-    return <main className="mx-auto w-full max-w-4xl px-4 py-8">Loading quiz...</main>;
+    return <main className="page-wrap">Loading quiz...</main>;
   }
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-4 py-8">
-      <h1 className="text-2xl font-semibold">Lesson Quiz</h1>
-      {error && <p className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+    <main className="page-wrap fade-up">
+      <h1 className="text-2xl font-semibold md:text-3xl">Lesson Quiz</h1>
+      {error && <p className="mt-4 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
       {quiz && !result && (
         <form onSubmit={submit} className="mt-6 space-y-4">
           {quiz.questions.map((question) => (
-            <section key={question.id} className="rounded-xl border border-slate-200 bg-white p-5">
+            <section key={question.id} className="surface p-5">
               <h2 className="font-medium">
                 {question.order}. {question.prompt}
               </h2>
@@ -163,21 +183,21 @@ export default function LessonQuizPage() {
               </div>
             </section>
           ))}
-          <button className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white">Submit Quiz</button>
+          <button className="btn btn-primary">Submit Quiz</button>
         </form>
       )}
 
       {result && (
         <section
           className={`mt-6 rounded-xl border p-5 ${
-            result.passed ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50"
+            result.passed ? "border-emerald-300 bg-emerald-500/10" : "border-red-300 bg-red-500/10"
           }`}
         >
           <h2 className="text-lg font-semibold">Result</h2>
           <p className="mt-2 text-sm">
             Score: <strong>{result.score}%</strong> | Status: <strong>{result.passed ? "Passed" : "Failed"}</strong>
           </p>
-          <p className="mt-1 text-sm text-slate-700">
+          <p className="mt-1 text-sm muted">
             Correct: {result.summary.correct_answers}/{result.summary.total_questions}
           </p>
           <div className="mt-4">
@@ -185,15 +205,15 @@ export default function LessonQuizPage() {
               <button
                 type="button"
                 onClick={goNext}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+                className="btn btn-primary"
               >
-                Next Lesson
+                {nextLessonId ? "Next Lesson" : examEligibility?.can_take_final_exam ? "Take Final Exam" : "Back to Dashboard"}
               </button>
             ) : (
               <button
                 type="button"
                 onClick={retryQuiz}
-                className="rounded-md bg-red-700 px-4 py-2 text-sm font-medium text-white"
+                className="btn btn-danger"
               >
                 Retry Quiz
               </button>
