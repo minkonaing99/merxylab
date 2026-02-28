@@ -32,7 +32,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'corsheaders',
     'rest_framework',
-    'rest_framework_simplejwt.token_blacklist',
     'core',
 ]
 
@@ -132,7 +131,6 @@ CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.getenv("CSRF_TRUSTED_ORI
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -142,8 +140,8 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("JWT_ACCESS_MINUTES", "15"))),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("JWT_REFRESH_DAYS", "7"))),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
 }
 
 STREAM_LEASE_TTL_SECONDS = int(os.getenv("STREAM_LEASE_TTL_SECONDS", "180"))
@@ -154,3 +152,7 @@ QUIZ_FAIL_COOLDOWN_MINUTES = int(os.getenv("QUIZ_FAIL_COOLDOWN_MINUTES", "30"))
 
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "")
+
+MONGO_URI = os.getenv("MONGO_URI", "")
+MONGO_DB = os.getenv("MONGO_DB", "merxylab")
+MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", "2000"))

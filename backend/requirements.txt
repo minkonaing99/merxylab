@@ -5,3 +5,4 @@ django-cors-headers==4.9.0
 PyMySQL==1.1.2
 python-dotenv==1.2.1
 cryptography==46.0.5
+pymongo==4.12.0
