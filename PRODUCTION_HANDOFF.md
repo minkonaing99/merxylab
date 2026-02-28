@@ -1,97 +1,87 @@
-# Production Handoff Checklist (MerxyLab)
+# MerxyLab Production Handoff
 
-This document is for the next engineer preparing deployment.
+## 1. Current Baseline
+- Backend: Django + DRF + JWT auth
+- Frontend: Next.js App Router
+- SQL: MySQL
+- Optional document storage: MongoDB for quiz definitions
+- Media: local filesystem HLS output (FFmpeg pipeline)
 
-## 1) Current Status
-- Backend checks: pass (`manage.py check`, tests pass).
-- Frontend checks: pass (`npm run lint`, `npm run build`).
-- Added production-oriented Django settings toggles:
-  - `STATIC_ROOT`, `MEDIA_URL`
-  - `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`
-  - `SECURE_SSL_REDIRECT`, `SECURE_HSTS_*`
-  - optional `USE_X_FORWARDED_PROTO`
-- Fixed top-nav hydration mismatch risk by rendering auth nav only after client mount.
-- Removed real password from `backend/.env.example` (placeholder only).
+Current seed policy:
+- `seed_mvp` creates admin-only baseline user:
+  - `merxy / Tkhantnaing1`
+- No demo students/courses/lessons are seeded.
 
-## 2) Required Environment (Production)
+## 2. Required Production Environment
 
 Backend required:
 - `DJANGO_SECRET_KEY` (strong random)
 - `DJANGO_DEBUG=false`
-- `DJANGO_ALLOWED_HOSTS=<your-domain>,<api-domain>`
-- MySQL vars: `MYSQL_*`
-- CORS/CSRF:
-  - `CORS_ALLOWED_ORIGINS=https://<frontend-domain>`
-  - `CSRF_TRUSTED_ORIGINS=https://<frontend-domain>`
-- Security flags:
-  - `SESSION_COOKIE_SECURE=true`
-  - `CSRF_COOKIE_SECURE=true`
-  - `SECURE_SSL_REDIRECT=true`
-  - `SECURE_HSTS_SECONDS=31536000`
-  - `SECURE_HSTS_INCLUDE_SUBDOMAINS=true`
-  - `SECURE_HSTS_PRELOAD=true`
-  - `USE_X_FORWARDED_PROTO=true` (if behind reverse proxy)
+- `DJANGO_ALLOWED_HOSTS=<api-domain>`
+- `MYSQL_*` connection values
+- `CORS_ALLOWED_ORIGINS=https://<frontend-domain>`
+- `CSRF_TRUSTED_ORIGINS=https://<frontend-domain>`
+- `SESSION_COOKIE_SECURE=true`
+- `CSRF_COOKIE_SECURE=true`
+- `SECURE_SSL_REDIRECT=true`
+- `SECURE_HSTS_SECONDS=31536000`
+- `SECURE_HSTS_INCLUDE_SUBDOMAINS=true`
+- `SECURE_HSTS_PRELOAD=true`
+- `USE_X_FORWARDED_PROTO=true` (if reverse proxy terminates TLS)
 
 Optional but recommended:
-- Mongo:
-  - `MONGO_URI=mongodb://...`
-  - `MONGO_DB=merxylab`
-- FFmpeg/FFprobe:
-  - `FFMPEG_BIN`, `FFPROBE_BIN` if not in system PATH
+- `MONGO_URI`, `MONGO_DB`, `MONGO_TIMEOUT_MS`
+- `FFMPEG_BIN`, `FFPROBE_BIN` if not in PATH
 
 Frontend required:
 - `NEXT_PUBLIC_API_BASE_URL=https://<api-domain>/api`
 
-## 3) Pre-Deploy Validation Commands
+## 3. Pre-Deploy Checks
 
-From repo root:
-
+Backend:
 ```powershell
 .\.venv\Scripts\python backend\manage.py check
 .\.venv\Scripts\python backend\manage.py check --deploy
 .\.venv\Scripts\python backend\manage.py test core
-.\.venv\Scripts\python backend\manage.py collectstatic --noinput
 ```
 
-From `frontend/`:
-
+Frontend:
 ```powershell
+cd frontend
 npm run lint
 npm run build
 ```
 
-## 4) Deploy-Time Commands
-
-Backend:
-
+## 4. Deployment Commands
 ```powershell
 .\.venv\Scripts\python backend\manage.py migrate
 .\.venv\Scripts\python backend\manage.py collectstatic --noinput
+.\.venv\Scripts\python backend\manage.py seed_mvp
 ```
 
-One-time data sync (if Mongo enabled and SQL has legacy quiz payloads):
-
+If Mongo is enabled and you need to sync legacy SQL quiz payloads:
 ```powershell
 .\.venv\Scripts\python backend\manage.py sync_quiz_to_mongo
 ```
 
-## 5) Runtime Smoke Tests
+## 5. Smoke Test Checklist
+- `GET /api/health/` returns `{"status":"ok"}`
+- Admin login works in frontend and Django admin
+- Admin can create course/lesson/quiz/final exam
+- Video upload/transcoding works (FFmpeg present)
+- Student can register and enroll using credits
+- Progression lock works across lessons/quizzes
+- Final exam unlock + certificate issuance flow works
+- Admin student verification approve/deny flow works
 
-- `GET /api/health/` returns healthy response.
-- Login works (admin and student).
-- Admin can:
-  - create course/lesson
-  - upload video
-  - create/manage quiz
-- Student can:
-  - enroll
-  - access only unlocked lessons
-  - pass/fail quiz with retry/cooldown policy
-  - play lesson video
+## 6. Operational Notes
+- Quiz source of truth is Mongo when configured; SQL quiz payload is cleared to avoid duplication.
+- SQL remains source of truth for relational entities and user progress.
+- Course/Lesson delete now performs media cleanup (HLS files) and quiz payload cleanup.
+- Profile deny clears stored passport photo file and sets verification note.
 
-## 6) Ownership Notes For Next Person
-
-- Single source of truth for quiz content is Mongo (when enabled).
-- SQL still stores relational progress/attempt/session data.
-- Uploaded/transcoded video segments are local media artifacts; use object storage in real production.
-- JWT tokens are currently browser localStorage-based. Move to httpOnly secure cookies for stronger XSS resistance in a future hardening cycle.
+## 7. Hardening Next (Recommended)
+- Move JWT storage from localStorage to httpOnly secure cookies.
+- Move media to object storage (S3-compatible) + CDN.
+- Add centralized logging/monitoring and alerting.
+- Add rate limiting and audit logs around admin-critical actions.

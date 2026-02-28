@@ -116,6 +116,7 @@ type FeedbackTarget =
 
 type AdminView = "build" | "manage" | "insights";
 const COURSE_LEVEL_OPTIONS = ["Beginner", "Intermediate", "Advanced"] as const;
+const NEW_COURSE_SELECTOR_VALUE = "__new__";
 const FINAL_EXAM_JSON_SAMPLE = `[
   {
     "question": "What happens if you call pop() on an empty list?",
@@ -159,6 +160,7 @@ export default function AdminUiPage() {
   const [insights, setInsights] = useState<AdminInsights | null>(null);
 
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+  const [isCreatingNewCourse, setIsCreatingNewCourse] = useState(false);
   const [selectedLessonIdForVideo, setSelectedLessonIdForVideo] = useState<number | null>(null);
   const [selectedLessonIdForQuiz, setSelectedLessonIdForQuiz] = useState<number | null>(null);
   const [step3ReadingContent, setStep3ReadingContent] = useState("");
@@ -494,6 +496,7 @@ export default function AdminUiPage() {
           accessToken,
         );
         setSelectedCourseId(created.id);
+        setIsCreatingNewCourse(false);
         setCourseForm({ title: "", slug: "", description: "", level: "Beginner", price_cents: 0, is_published: true });
       },
       "Course created. Continue with Step 2.",
@@ -1110,10 +1113,25 @@ export default function AdminUiPage() {
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-600">Working Course</p>
           <select
             className="w-full rounded border px-3 py-2 text-sm"
-            value={selectedCourseId ?? ""}
-            onChange={(e) => setSelectedCourseId(e.target.value ? Number(e.target.value) : null)}
+            value={selectedCourseId != null ? String(selectedCourseId) : isCreatingNewCourse ? NEW_COURSE_SELECTOR_VALUE : ""}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (!value) {
+                setSelectedCourseId(null);
+                setIsCreatingNewCourse(false);
+                return;
+              }
+              if (value === NEW_COURSE_SELECTOR_VALUE) {
+                setSelectedCourseId(null);
+                setIsCreatingNewCourse(true);
+                return;
+              }
+              setSelectedCourseId(Number(value));
+              setIsCreatingNewCourse(false);
+            }}
           >
-            <option value="">Select course</option>
+            <option value="">Select existing course</option>
+            <option value={NEW_COURSE_SELECTOR_VALUE}>+ Create new course (Step 1)</option>
             {courses.map((course) => (
               <option key={course.id} value={course.id}>
                 {course.title}
@@ -1217,30 +1235,45 @@ export default function AdminUiPage() {
           </ul>
         </div>
 
-        <form onSubmit={createCourse} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Step 1: Create Course</h2>
-          <p className="mt-2 text-xs text-slate-500">
-            Select a difficulty level so students can understand the course depth before enrolling.
-          </p>
-          <input className="mt-3 w-full rounded border px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(e) => setCourseForm((v) => ({ ...v, title: e.target.value }))} required />
-          <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Course slug (example: python-basics)" value={courseForm.slug} onChange={(e) => setCourseForm((v) => ({ ...v, slug: e.target.value }))} required />
-          <label className="mt-2 block text-xs text-slate-600">Course level</label>
-          <select className="mt-1 w-full rounded border px-3 py-2" value={courseForm.level} onChange={(e) => setCourseForm((v) => ({ ...v, level: e.target.value }))}>
-            {COURSE_LEVEL_OPTIONS.map((level) => (
-              <option key={level} value={level}>
-                {level}
-              </option>
-            ))}
-          </select>
-          <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
-          <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
-            Publish immediately
-          </label>
-          <button disabled={loading} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white">Create Course</button>
-          {renderFeedback("step1-course")}
-        </form>
+        {(isCreatingNewCourse || courses.length === 0) && (
+          <form onSubmit={createCourse} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold">Step 1: Create Course</h2>
+            <p className="mt-2 text-xs text-slate-500">
+              Select a difficulty level so students can understand the course depth before enrolling.
+            </p>
+            <input className="mt-3 w-full rounded border px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(e) => setCourseForm((v) => ({ ...v, title: e.target.value }))} required />
+            <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Course slug (example: python-basics)" value={courseForm.slug} onChange={(e) => setCourseForm((v) => ({ ...v, slug: e.target.value }))} required />
+            <label className="mt-2 block text-xs text-slate-600">Course level</label>
+            <select className="mt-1 w-full rounded border px-3 py-2" value={courseForm.level} onChange={(e) => setCourseForm((v) => ({ ...v, level: e.target.value }))}>
+              {COURSE_LEVEL_OPTIONS.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+            <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
+            <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
+            <label className="mt-2 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
+              Publish immediately
+            </label>
+            <button disabled={loading} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white">Create Course</button>
+            {renderFeedback("step1-course")}
+          </form>
+        )}
+
+        {selectedCourseId == null && !isCreatingNewCourse && courses.length > 0 && (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold">Step 1</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              Select an existing course from the top Working Course selector to continue at Step 2, or choose
+              {" "}
+              <strong>+ Create new course (Step 1)</strong>
+              {" "}
+              to start from scratch.
+            </p>
+          </div>
+        )}
 
         <form onSubmit={createLesson} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Step 2: Add Lesson</h2>
