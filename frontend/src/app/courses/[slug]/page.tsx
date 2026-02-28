@@ -157,7 +157,7 @@ export default function CourseDetailPage() {
               disabled={busy}
               className="btn btn-primary mt-5 disabled:opacity-60"
             >
-              {busy ? "Enrolling..." : "Enroll For Free"}
+              {busy ? "Enrolling..." : "Enroll"}
             </button>
           )}
           {course.enrolled && (

@@ -105,9 +105,17 @@ export default function LessonQuizPage() {
     if (!quiz) {
       return;
     }
-    if (!accessToken) {
+    const token = accessToken || getAccessToken();
+    if (!token) {
       setError("Please login first.");
       return;
+    }
+    const unansweredCount = quiz.questions.filter((q) => answers[q.id] == null).length;
+    if (unansweredCount > 0) {
+      const proceed = window.confirm(
+        `You have ${unansweredCount} unanswered question(s). If you submit now, they will be counted as wrong.`,
+      );
+      if (!proceed) return;
     }
     setError("");
     try {
@@ -122,7 +130,7 @@ export default function LessonQuizPage() {
             })),
           }),
         },
-        accessToken,
+        token,
       );
       setResult(payload);
     } catch (err) {

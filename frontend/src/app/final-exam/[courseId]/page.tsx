@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
@@ -15,6 +15,10 @@ type FinalExam = {
   passing_score: number;
   time_limit_sec: number | null;
   questions: Question[];
+  retry_fee_credits?: number;
+  retry_fee_required?: boolean;
+  failed_attempts?: number;
+  current_credits?: number;
 };
 
 type SubmitResult = {
@@ -23,6 +27,7 @@ type SubmitResult = {
   summary: { total_questions: number; correct_answers: number; passing_score: number };
   certificate_issued: boolean;
   certificate_created: boolean;
+  charged_credits?: number;
   certificate: { certificate_code: string; issued_at: string } | null;
 };
 
@@ -39,7 +44,7 @@ export default function CourseFinalExamPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
+  const loadExam = useCallback(async () => {
     const token = accessToken || getAccessToken();
     if (!token) {
       router.replace(`/login?next=${encodeURIComponent(pathname)}`);
@@ -50,20 +55,35 @@ export default function CourseFinalExamPage() {
       setLoading(false);
       return;
     }
-    apiFetch<FinalExam>(`/courses/${courseId}/final-exam/`, {}, token)
-      .then((res) => setExam(res))
-      .catch((err) => {
-        const message = err instanceof ApiError ? err.message : "Failed to load final exam.";
-        setError(message);
-      })
-      .finally(() => setLoading(false));
+    setLoading(true);
+    setError("");
+    try {
+      const res = await apiFetch<FinalExam>(`/courses/${courseId}/final-exam/`, {}, token);
+      setExam(res);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Failed to load final exam.";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
   }, [accessToken, courseId, pathname, router]);
+
+  useEffect(() => {
+    void loadExam();
+  }, [loadExam]);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!exam) return;
     const token = accessToken || getAccessToken();
     if (!token) return;
+    const unansweredCount = exam.questions.filter((q) => answers[q.id] == null).length;
+    if (unansweredCount > 0) {
+      const proceed = window.confirm(
+        `You have ${unansweredCount} unanswered question(s). If you submit now, they will be counted as wrong.`,
+      );
+      if (!proceed) return;
+    }
     setSubmitting(true);
     setError("");
     try {
@@ -103,6 +123,13 @@ export default function CourseFinalExamPage() {
             <p className="mt-2 text-sm muted">
               Passing score: {exam.passing_score}% {exam.time_limit_sec ? `| Time limit: ${exam.time_limit_sec}s` : ""}
             </p>
+            {exam.retry_fee_required && (
+              <p className="mt-2 rounded border border-amber-300 bg-amber-500/10 p-2 text-xs text-amber-700">
+                Retry fee active: {exam.retry_fee_credits ?? 50} credits per attempt after 3 failures.
+                {" "}
+                Current credits: {exam.current_credits ?? 0}.
+              </p>
+            )}
           </section>
           {exam.questions.map((question) => (
             <section key={question.id} className="surface p-5">
@@ -153,6 +180,7 @@ export default function CourseFinalExamPage() {
                 onClick={() => {
                   setResult(null);
                   setAnswers({});
+                  void loadExam();
                 }}
               >
                 Retry Final Exam

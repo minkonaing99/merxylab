@@ -176,6 +176,25 @@ class FinalExamAttempt(TimeStampedModel):
         return f"final-attempt:{self.user_id}:{self.exam_id}:{self.score}"
 
 
+class FinalExamSession(TimeStampedModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="final_exam_sessions")
+    exam = models.ForeignKey(FinalExam, on_delete=models.CASCADE, related_name="active_sessions")
+    question_ids = models.JSONField(default=list, blank=True)
+    choice_order_map = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "exam"], name="uniq_final_exam_session_user_exam"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "exam"]),
+        ]
+
+    def __str__(self):
+        return f"final-session:{self.user_id}:{self.exam_id}"
+
+
 class Certificate(TimeStampedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="certificates")
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="certificates")

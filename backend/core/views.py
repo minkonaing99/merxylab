@@ -1,4 +1,5 @@
 import mimetypes
+import random
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ from core.models import (
     FinalExamAttempt,
     FinalExamChoice,
     FinalExamQuestion,
+    FinalExamSession,
     Lesson,
     QuizAttempt,
     StudentProfile,
@@ -127,6 +129,34 @@ def _ordered_course_lessons(course):
     )
 
 
+def _effective_completed_lesson_ids(user, course, lessons=None, quiz_map=None):
+    lessons = lessons if lessons is not None else _ordered_course_lessons(course)
+    quiz_map = quiz_map if quiz_map is not None else get_quiz_map(lessons)
+    no_quiz_lesson_ids = {lesson.id for lesson in lessons if lesson.id not in quiz_map}
+    lesson_lookup = {lesson.id: lesson for lesson in lessons}
+
+    progress_rows = UserLessonProgress.objects.filter(user=user, lesson__course=course).values(
+        "lesson_id",
+        "completed",
+        "last_position_seconds",
+    )
+    completed_ids = set()
+    for row in progress_rows:
+        lesson_id = row["lesson_id"]
+        if row["completed"]:
+            completed_ids.add(lesson_id)
+            continue
+
+        # For video lessons without quiz, allow progression at >= 90% watch progress.
+        if lesson_id in no_quiz_lesson_ids:
+            lesson = lesson_lookup.get(lesson_id)
+            if lesson and lesson.content_type == Lesson.ContentType.VIDEO and lesson.duration_seconds:
+                if int(row["last_position_seconds"] or 0) >= int(lesson.duration_seconds * 0.9):
+                    completed_ids.add(lesson_id)
+
+    return completed_ids
+
+
 def _unlocked_lesson_ids(user, course):
     lessons = _ordered_course_lessons(course)
     unlocked = set()
@@ -142,9 +172,8 @@ def _unlocked_lesson_ids(user, course):
                 unlocked.add(lesson.id)
         return unlocked
 
-    completed_ids = set(
-        UserLessonProgress.objects.filter(user=user, lesson__course=course, completed=True).values_list("lesson_id", flat=True)
-    )
+    quiz_map = get_quiz_map(lessons)
+    completed_ids = _effective_completed_lesson_ids(user, course, lessons=lessons, quiz_map=quiz_map)
     passed_quiz_lesson_ids = set(
         QuizAttempt.objects.filter(
             user=user,
@@ -152,7 +181,6 @@ def _unlocked_lesson_ids(user, course):
             lesson__course=course,
         ).values_list("lesson_id", flat=True)
     )
-    quiz_map = get_quiz_map(lessons)
     quiz_lesson_ids = set(quiz_map.keys())
 
     for idx, lesson in enumerate(lessons):
@@ -216,9 +244,8 @@ def _course_completion_summary(user, course):
             "missing_lessons": [],
         }
 
-    completed_ids = set(
-        UserLessonProgress.objects.filter(user=user, lesson__course=course, completed=True).values_list("lesson_id", flat=True)
-    )
+    quiz_map = get_quiz_map(lessons)
+    completed_ids = _effective_completed_lesson_ids(user, course, lessons=lessons, quiz_map=quiz_map)
     passed_quiz_lesson_ids = set(
         QuizAttempt.objects.filter(
             user=user,
@@ -226,7 +253,6 @@ def _course_completion_summary(user, course):
             lesson__course=course,
         ).values_list("lesson_id", flat=True)
     )
-    quiz_map = get_quiz_map(lessons)
     completed_count = 0
     missing = []
 
@@ -272,6 +298,48 @@ def _final_exam_unlock_summary(user, course):
         "exam_exists": exam_exists,
         "can_take_final_exam": can_take_final_exam,
     }
+
+
+def _active_final_exam_session(user, exam, questions):
+    total = len(questions)
+    if total == 0:
+        return None
+
+    target_size = min(5, total)
+    question_lookup = {question.id: question for question in questions}
+    session, _ = FinalExamSession.objects.get_or_create(user=user, exam=exam)
+
+    valid_ids = [qid for qid in (session.question_ids or []) if qid in question_lookup]
+    if len(valid_ids) != target_size:
+        sampled = random.sample([q.id for q in questions], target_size)
+        random.shuffle(sampled)
+        choice_order_map = {}
+        for qid in sampled:
+            choices = list(question_lookup[qid].choices.all().order_by("order", "id"))
+            choice_ids = [choice.id for choice in choices]
+            random.shuffle(choice_ids)
+            choice_order_map[str(qid)] = choice_ids
+        session.question_ids = sampled
+        session.choice_order_map = choice_order_map
+        session.save(update_fields=["question_ids", "choice_order_map", "updated_at"])
+        return session
+
+    # Rebuild missing/invalid choice order entries when needed.
+    choice_order_map = dict(session.choice_order_map or {})
+    updated = False
+    for qid in valid_ids:
+        key = str(qid)
+        choice_ids = [choice.id for choice in question_lookup[qid].choices.all().order_by("order", "id")]
+        existing = [cid for cid in choice_order_map.get(key, []) if cid in choice_ids]
+        if len(existing) != len(choice_ids):
+            existing = choice_ids[:]
+            random.shuffle(existing)
+            choice_order_map[key] = existing
+            updated = True
+    if updated:
+        session.choice_order_map = choice_order_map
+        session.save(update_fields=["choice_order_map", "updated_at"])
+    return session
 
 
 def _issue_stream_token(*, user_id, lesson_id, session_id, device_id):
@@ -785,7 +853,56 @@ def course_final_exam(request, course_id):
         )
 
     exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
-    return Response(FinalExamSerializer(exam, context={"include_answers": False}).data)
+    questions = list(exam.questions.all().order_by("order", "id"))
+    session = _active_final_exam_session(request.user, exam, questions)
+    if session is None:
+        return Response({"detail": "Final exam question bank is empty."}, status=status.HTTP_400_BAD_REQUEST)
+    retry_fee_credits = int(getattr(settings, "FINAL_EXAM_RETRY_FEE_CREDITS", 50))
+    failed_attempts = FinalExamAttempt.objects.filter(user=request.user, exam=exam, passed=False).count()
+    retry_fee_required = failed_attempts >= 3
+    wallet = _wallet_for_user(request.user)
+
+    question_lookup = {question.id: question for question in questions}
+    payload_questions = []
+    for qid in session.question_ids:
+        question = question_lookup.get(qid)
+        if question is None:
+            continue
+        ordered_choice_ids = session.choice_order_map.get(str(qid), [])
+        choices_lookup = {choice.id: choice for choice in question.choices.all()}
+        ordered_choices = []
+        for choice_id in ordered_choice_ids:
+            choice = choices_lookup.get(choice_id)
+            if choice is None:
+                continue
+            ordered_choices.append({"id": choice.id, "text": choice.text, "order": len(ordered_choices) + 1})
+        if not ordered_choices:
+            for choice in question.choices.all().order_by("order", "id"):
+                ordered_choices.append({"id": choice.id, "text": choice.text, "order": len(ordered_choices) + 1})
+        payload_questions.append(
+            {
+                "id": question.id,
+                "prompt": question.prompt,
+                "order": len(payload_questions) + 1,
+                "choices": ordered_choices,
+            }
+        )
+
+    return Response(
+        {
+            "id": exam.id,
+            "course_id": exam.course_id,
+            "title": exam.title,
+            "passing_score": exam.passing_score,
+            "time_limit_sec": exam.time_limit_sec,
+            "is_published": exam.is_published,
+            "questions": payload_questions,
+            "retry_fee_credits": retry_fee_credits,
+            "retry_fee_required": retry_fee_required,
+            "failed_attempts": failed_attempts,
+            "current_credits": wallet.balance_credits,
+        }
+    )
 
 
 @api_view(["POST"])
@@ -810,11 +927,16 @@ def submit_course_final_exam(request, course_id):
     submitted_answers = serializer.validated_data["answers"]
 
     exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
-    questions = list(exam.questions.all().order_by("order", "id"))
-    if not questions:
+    all_questions = list(exam.questions.all().order_by("order", "id"))
+    if not all_questions:
         return Response({"detail": "Final exam question bank is empty."}, status=status.HTTP_400_BAD_REQUEST)
+    session = _active_final_exam_session(request.user, exam, all_questions)
+    if session is None or not session.question_ids:
+        return Response({"detail": "Final exam question set is unavailable."}, status=status.HTTP_400_BAD_REQUEST)
+    question_lookup = {question.id: question for question in all_questions if question.id in set(session.question_ids)}
+    questions = [question_lookup[qid] for qid in session.question_ids if qid in question_lookup]
 
-    question_map = {q.id: q for q in questions}
+    question_map = {question.id: question for question in questions}
     seen_questions = set()
     normalized_answers = []
     correct_count = 0
@@ -835,13 +957,41 @@ def submit_course_final_exam(request, course_id):
             correct_count += 1
         normalized_answers.append({"question_id": qid, "choice_id": cid})
 
-    if len(seen_questions) != len(questions):
-        return Response({"detail": "All exam questions must be answered."}, status=status.HTTP_400_BAD_REQUEST)
-
     score = round((correct_count / len(questions)) * 100, 2)
     passed = score >= float(exam.passing_score)
 
+    retry_fee_credits = int(getattr(settings, "FINAL_EXAM_RETRY_FEE_CREDITS", 50))
+    charged_credits = 0
+
     with transaction.atomic():
+        # Lock wallet row first to serialize credit-sensitive submit attempts per user.
+        wallet, _ = CreditWallet.objects.get_or_create(user=request.user, defaults={"balance_credits": 0})
+        wallet = CreditWallet.objects.select_for_update().get(id=wallet.id)
+        failed_attempts = FinalExamAttempt.objects.filter(user=request.user, exam=exam, passed=False).count()
+        if failed_attempts >= 3:
+            if wallet.balance_credits < retry_fee_credits:
+                return Response(
+                    {
+                        "detail": "Insufficient credits for final exam retry fee.",
+                        "required_credits": retry_fee_credits,
+                        "current_credits": wallet.balance_credits,
+                        "failed_attempts": failed_attempts,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            wallet.balance_credits -= retry_fee_credits
+            wallet.save(update_fields=["balance_credits", "updated_at"])
+            CreditTransaction.objects.create(
+                user=request.user,
+                amount=-retry_fee_credits,
+                balance_after=wallet.balance_credits,
+                kind=CreditTransaction.Kind.COURSE_PURCHASE,
+                note=f"Final exam retry fee: {course.title}",
+                course=course,
+                created_by=request.user,
+            )
+            charged_credits = retry_fee_credits
+
         attempt = FinalExamAttempt.objects.create(
             user=request.user,
             exam=exam,
@@ -849,6 +999,7 @@ def submit_course_final_exam(request, course_id):
             passed=passed,
             answers_payload=normalized_answers,
         )
+        FinalExamSession.objects.filter(user=request.user, exam=exam).delete()
         certificate = None
         certificate_created = False
         if passed:
@@ -873,6 +1024,7 @@ def submit_course_final_exam(request, course_id):
     payload["certificate_issued"] = bool(passed)
     payload["certificate_created"] = bool(certificate_created) if passed else False
     payload["certificate"] = CertificateSerializer(certificate).data if passed and certificate else None
+    payload["charged_credits"] = charged_credits
     return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -1580,9 +1732,19 @@ def lesson_progress(request, lesson_id):
     serializer.is_valid(raise_exception=True)
 
     progress.last_position_seconds = serializer.validated_data["last_position_seconds"]
+    has_quiz = bool(get_quiz_payload(lesson).get("questions"))
+    completed_flag = bool(serializer.validated_data["completed"])
+    if (
+        not has_quiz
+        and lesson.content_type == Lesson.ContentType.VIDEO
+        and lesson.duration_seconds
+        and progress.last_position_seconds >= int(lesson.duration_seconds * 0.9)
+    ):
+        completed_flag = True
+
     # Completion is sticky: once completed, subsequent partial progress updates
     # should not regress the lesson back to incomplete.
-    progress.completed = progress.completed or serializer.validated_data["completed"]
+    progress.completed = progress.completed or completed_flag
     progress.save(update_fields=["last_position_seconds", "completed", "updated_at"])
 
     return Response(UserLessonProgressSerializer(progress).data)

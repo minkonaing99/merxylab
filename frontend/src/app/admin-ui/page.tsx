@@ -1130,8 +1130,8 @@ export default function AdminUiPage() {
               setIsCreatingNewCourse(false);
             }}
           >
-            <option value="">Select existing course</option>
             <option value={NEW_COURSE_SELECTOR_VALUE}>+ Create new course (Step 1)</option>
+            <option disabled value="">Working course...</option>
             {courses.map((course) => (
               <option key={course.id} value={course.id}>
                 {course.title}

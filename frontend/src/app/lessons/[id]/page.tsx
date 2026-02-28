@@ -56,7 +56,23 @@ export default function LessonPage() {
   const [examEligibility, setExamEligibility] = useState<ExamEligibility | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const deviceIdRef = useRef<string>("");
-  const progressKey = useMemo(() => `lesson-progress-${lessonId}`, [lessonId]);
+  const progressKey = useMemo(() => {
+    const token = accessToken || getAccessToken();
+    const fallback = `lesson-progress-anon-${lessonId}`;
+    if (!token || typeof window === "undefined") return fallback;
+    try {
+      const payloadBase64 = token.split(".")[1];
+      if (!payloadBase64) return fallback;
+      const normalized = payloadBase64.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+      const decoded = window.atob(padded);
+      const payload = JSON.parse(decoded) as { user_id?: number | string; sub?: number | string };
+      const userScope = payload.user_id ?? payload.sub;
+      return userScope ? `lesson-progress-user-${String(userScope)}-${lessonId}` : fallback;
+    } catch {
+      return fallback;
+    }
+  }, [accessToken, lessonId]);
 
   const getEffectiveDuration = useCallback(() => {
     const knownDuration = lesson?.duration_seconds ?? null;
@@ -74,15 +90,15 @@ export default function LessonPage() {
     if (!lesson || !accessToken || !videoRef.current) return;
     const current = Math.floor(videoRef.current.currentTime || 0);
     const effectiveDuration = getEffectiveDuration();
-    const playbackCompleted =
-      effectiveDuration > 0 &&
-      (videoRef.current.ended || (videoRef.current.currentTime || 0) >= effectiveDuration);
+    const playbackPosition = videoRef.current.currentTime || 0;
+    const playbackCompleted = effectiveDuration > 0 && (videoRef.current.ended || playbackPosition >= effectiveDuration);
+    const reachedNinetyPercent = effectiveDuration > 0 && playbackPosition >= effectiveDuration * 0.9;
     const completed =
       typeof completedOverride === "boolean"
         ? completedOverride
         : lesson.has_quiz
           ? effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95
-          : playbackCompleted;
+          : reachedNinetyPercent || playbackCompleted;
     persistLocalProgress(current);
     await apiFetch(
       `/lessons/${lesson.id}/progress/`,
@@ -335,8 +351,13 @@ export default function LessonPage() {
       const token = accessToken || getAccessToken();
       if (!lesson || !token || !videoRef.current) return;
       const current = Math.floor(videoRef.current.currentTime || 0);
+      const effectiveDuration = getEffectiveDuration();
+      const reachedNinetyPercent = effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.9;
+      const completed = lesson.has_quiz
+        ? effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95
+        : reachedNinetyPercent || Boolean(videoRef.current.ended);
       persistLocalProgress(current);
-      const payload = JSON.stringify({ last_position_seconds: current, completed: false });
+      const payload = JSON.stringify({ last_position_seconds: current, completed });
       void fetch(`${API_ORIGIN}/api/lessons/${lesson.id}/progress/`, {
         method: "POST",
         keepalive: true,

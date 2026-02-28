@@ -255,7 +255,7 @@ class QuizSubmitAnswerSerializer(serializers.Serializer):
 
 
 class QuizSubmitSerializer(serializers.Serializer):
-    answers = QuizSubmitAnswerSerializer(many=True, allow_empty=False)
+    answers = QuizSubmitAnswerSerializer(many=True, allow_empty=True)
 
 
 class QuizAttemptSerializer(serializers.ModelSerializer):
@@ -467,7 +467,7 @@ class FinalExamSubmitAnswerSerializer(serializers.Serializer):
 
 
 class FinalExamSubmitSerializer(serializers.Serializer):
-    answers = FinalExamSubmitAnswerSerializer(many=True, allow_empty=False)
+    answers = FinalExamSubmitAnswerSerializer(many=True, allow_empty=True)
 
 
 class FinalExamAttemptSerializer(serializers.ModelSerializer):

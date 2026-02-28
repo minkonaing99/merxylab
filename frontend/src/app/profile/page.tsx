@@ -338,15 +338,17 @@ export default function ProfilePage() {
               Address
               <textarea className="input min-h-24" value={form.address} onChange={(e) => setForm((v) => ({ ...v, address: e.target.value }))} />
             </label>
-            <label className="text-sm md:col-span-2">
-              Passport photo (.jpg, .jpeg, .png, .webp, max 5MB)
-              <input
-                type="file"
-                accept=".jpg,.jpeg,.png,.webp"
-                className="input"
-                onChange={(e) => setPassportPhoto(e.target.files?.[0] ?? null)}
-              />
-            </label>
+            {verificationStatus !== "VERIFIED" && (
+              <label className="text-sm md:col-span-2">
+                Passport photo (.jpg, .jpeg, .png, .webp, max 5MB)
+                <input
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp"
+                  className="input"
+                  onChange={(e) => setPassportPhoto(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            )}
             {passportPhotoUrl && (
               <div className="md:col-span-2">
                 <p className="mb-2 text-sm muted">Passport photo uploaded successfully. Preview is hidden for privacy.</p>
