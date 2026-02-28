@@ -182,3 +182,36 @@ body::before {
     animation: none !important;
   }
 }
+
+/* Keep legacy hardcoded admin utility colors theme-aware. */
+.admin-theme-scope .bg-white {
+  background: color-mix(in srgb, var(--surface) 92%, transparent) !important;
+}
+
+.admin-theme-scope .bg-slate-50,
+.admin-theme-scope .bg-slate-100 {
+  background: color-mix(in srgb, var(--surface-soft) 88%, transparent) !important;
+}
+
+.admin-theme-scope .border-slate-200,
+.admin-theme-scope .border-slate-300 {
+  border-color: var(--border) !important;
+}
+
+.admin-theme-scope .text-slate-500,
+.admin-theme-scope .text-slate-600,
+.admin-theme-scope .text-slate-700 {
+  color: var(--muted) !important;
+}
+
+.admin-theme-scope .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--border) !important;
+}
+
+.admin-theme-scope .bg-slate-900 {
+  background: var(--accent-strong) !important;
+}
+
+.admin-theme-scope .text-slate-900 {
+  color: var(--foreground) !important;
+}

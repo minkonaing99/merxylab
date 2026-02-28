@@ -1,3 +1,6 @@
+import re
+from datetime import date
+
 from rest_framework import serializers
 
 from core.models import (
@@ -18,6 +21,8 @@ from core.models import (
 class LessonAccessSerializer(serializers.ModelSerializer):
     locked = serializers.SerializerMethodField()
     section_id = serializers.SerializerMethodField()
+    has_quiz = serializers.SerializerMethodField()
+    quiz_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
@@ -32,6 +37,8 @@ class LessonAccessSerializer(serializers.ModelSerializer):
             "duration_seconds",
             "hls_master_path",
             "locked",
+            "has_quiz",
+            "quiz_status",
         ]
 
     def get_locked(self, obj):
@@ -42,6 +49,13 @@ class LessonAccessSerializer(serializers.ModelSerializer):
 
     def get_section_id(self, obj):
         return obj.section_order
+
+    def get_has_quiz(self, obj):
+        return bool(obj.quiz_payload and obj.quiz_payload.get("questions"))
+
+    def get_quiz_status(self, obj):
+        quiz_status_map = self.context.get("quiz_status_by_lesson", {})
+        return quiz_status_map.get(obj.id)
 
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -70,6 +84,7 @@ class CourseDetailSerializer(CourseListSerializer):
             obj.lessons.all().order_by("section_order", "order", "id")
         )
         unlocked_ids = self.context.get("unlocked_lesson_ids", set())
+        quiz_status_map = self.context.get("quiz_status_by_lesson", {})
 
         grouped = {}
         for lesson in lessons:
@@ -87,7 +102,7 @@ class CourseDetailSerializer(CourseListSerializer):
             grouped[key]["lessons"].append(
                 LessonAccessSerializer(
                     lesson,
-                    context={"unlocked_lesson_ids": unlocked_ids},
+                    context={"unlocked_lesson_ids": unlocked_ids, "quiz_status_by_lesson": quiz_status_map},
                 ).data
             )
 
@@ -157,16 +172,37 @@ class StudentProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Passport photo must be 5MB or smaller.")
         return value
 
+    def validate_date_of_birth(self, value):
+        if not value:
+            return value
+        today = date.today()
+        age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
+        if age < 13:
+            raise serializers.ValidationError("Student must be at least 13 years old.")
+        return value
+
+    def validate_passport_number(self, value):
+        if not value:
+            return value
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}\d{6}", normalized):
+            raise serializers.ValidationError("Passport number format must be 2 letters followed by 6 digits (example: AB123456).")
+        return normalized
+
 
 class LessonDetailSerializer(serializers.ModelSerializer):
     has_quiz = serializers.SerializerMethodField()
     section_id = serializers.SerializerMethodField()
+    course_title = serializers.CharField(source="course.title", read_only=True)
+    course_slug = serializers.CharField(source="course.slug", read_only=True)
 
     class Meta:
         model = Lesson
         fields = [
             "id",
             "course_id",
+            "course_title",
+            "course_slug",
             "section_id",
             "title",
             "order",
@@ -490,6 +526,9 @@ class AdminStudentListRowSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
     username = serializers.CharField()
     email = serializers.CharField(allow_blank=True)
+    full_name = serializers.CharField(allow_blank=True, required=False)
+    verification_status = serializers.CharField(required=False)
+    has_passport_photo = serializers.BooleanField(required=False)
     role = serializers.CharField()
     credits = serializers.IntegerField()
     enrollments = serializers.IntegerField()

@@ -5,11 +5,15 @@ import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
+import { setTheme } from "@/lib/theme";
 
 type StudentRow = {
   user_id: number;
   username: string;
   email: string;
+  full_name?: string;
+  verification_status?: "PENDING" | "VERIFIED" | "REJECTED";
+  has_passport_photo?: boolean;
   role: string;
   credits: number;
   enrollments: number;
@@ -36,6 +40,22 @@ type WalletPayload = {
     payment_provider: string;
   }>;
 };
+type StudentProfilePayload = {
+  student: { id: number; username: string; email: string };
+  profile: {
+    full_name: string;
+    date_of_birth: string | null;
+    passport_number: string;
+    passport_photo_url: string;
+    phone_number: string;
+    country: string;
+    city: string;
+    address: string;
+    verification_status: "PENDING" | "VERIFIED" | "REJECTED";
+    verification_note: string;
+    profile_completed: boolean;
+  };
+};
 
 export default function AdminStudentsPage() {
   const router = useRouter();
@@ -44,12 +64,18 @@ export default function AdminStudentsPage() {
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
   const [walletDetail, setWalletDetail] = useState<WalletPayload | null>(null);
+  const [studentProfile, setStudentProfile] = useState<StudentProfilePayload | null>(null);
+  const [reviewNote, setReviewNote] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setTheme("light");
+  }, []);
 
   const loadStudents = useCallback(async (token: string) => {
     const rows = await apiFetch<StudentRow[]>("/admin/students/", {}, token);
@@ -59,6 +85,10 @@ export default function AdminStudentsPage() {
   const loadWallet = useCallback(async (token: string, userId: number) => {
     const payload = await apiFetch<WalletPayload>(`/admin/students/${userId}/wallet/`, {}, token);
     setWalletDetail(payload);
+  }, []);
+  const loadProfile = useCallback(async (token: string, userId: number) => {
+    const payload = await apiFetch<StudentProfilePayload>(`/admin/students/${userId}/profile/`, {}, token);
+    setStudentProfile(payload);
   }, []);
 
   useEffect(() => {
@@ -87,7 +117,8 @@ export default function AdminStudentsPage() {
     const token = accessToken || getAccessToken();
     if (!token || !selectedStudentId) return;
     loadWallet(token, selectedStudentId).catch(() => setWalletDetail(null));
-  }, [accessToken, loadWallet, selectedStudentId]);
+    loadProfile(token, selectedStudentId).catch(() => setStudentProfile(null));
+  }, [accessToken, loadProfile, loadWallet, selectedStudentId]);
 
   const adjustCredits = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -114,16 +145,94 @@ export default function AdminStudentsPage() {
     }
   };
 
+  const reviewProfile = async (action: "approve" | "deny") => {
+    const token = accessToken || getAccessToken();
+    if (!token || !selectedStudentId) return;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = await apiFetch<{ detail: string }>(
+        `/admin/students/${selectedStudentId}/profile/review/`,
+        { method: "POST", body: JSON.stringify({ action, note: reviewNote }) },
+        token,
+      );
+      await loadStudents(token);
+      await loadProfile(token, selectedStudentId);
+      setNotice(payload.detail);
+      if (action === "approve") {
+        setReviewNote("");
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to review profile.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (isAdmin === null) {
-    return <main className="page-wrap">Checking access...</main>;
+    return <main className="admin-theme-scope page-wrap">Checking access...</main>;
   }
 
   return (
-    <main className="page-wrap fade-up">
+    <main className="admin-theme-scope page-wrap fade-up">
       <h1 className="text-3xl font-semibold md:text-4xl">Student Credit Management</h1>
-      <p className="mt-2 text-sm muted">Manage student balances, transaction history, and enrollment payment status.</p>
+      <p className="mt-2 text-sm muted">Manage student profile verification, passport review, balances, and enrollment payment status.</p>
       {error && <p className="mt-4 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
       {notice && <p className="mt-4 rounded-lg border border-emerald-300 bg-emerald-500/10 p-3 text-sm text-emerald-500">{notice}</p>}
+
+      <section className="mt-6 surface p-5">
+        <h2 className="text-lg font-semibold">Student Profile Verification</h2>
+        {!studentProfile && <p className="mt-3 text-sm muted">Select a student to review profile and passport details.</p>}
+        {studentProfile && (
+          <>
+            <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+              <p><strong>Full Name:</strong> {studentProfile.profile.full_name || "-"}</p>
+              <p><strong>Date of Birth:</strong> {studentProfile.profile.date_of_birth || "-"}</p>
+              <p><strong>Passport Number:</strong> {studentProfile.profile.passport_number || "-"}</p>
+              <p><strong>Phone:</strong> {studentProfile.profile.phone_number || "-"}</p>
+              <p><strong>Country/City:</strong> {studentProfile.profile.country || "-"} / {studentProfile.profile.city || "-"}</p>
+              <p><strong>Current Status:</strong> {studentProfile.profile.verification_status}</p>
+              <p className="md:col-span-2"><strong>Address:</strong> {studentProfile.profile.address || "-"}</p>
+              <p className="md:col-span-2"><strong>Admin Note:</strong> {studentProfile.profile.verification_note || "-"}</p>
+            </div>
+            <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-medium">Passport Photo</p>
+              {studentProfile.profile.passport_photo_url ? (
+                <img
+                  src={studentProfile.profile.passport_photo_url}
+                  alt="Passport"
+                  className="mt-2 max-h-80 rounded border"
+                />
+              ) : (
+                <p className="mt-2 text-xs muted">No passport photo uploaded.</p>
+              )}
+            </div>
+            {studentProfile.profile.passport_photo_url ? (
+              <div className="mt-3 grid gap-2">
+                <input
+                  className="input"
+                  placeholder="Review note (optional for approve, recommended for deny)"
+                  value={reviewNote}
+                  onChange={(e) => setReviewNote(e.target.value)}
+                />
+                <div className="flex gap-2">
+                  <button type="button" className="btn btn-primary" disabled={loading} onClick={() => reviewProfile("approve")}>
+                    Approve
+                  </button>
+                  <button type="button" className="btn btn-danger" disabled={loading} onClick={() => reviewProfile("deny")}>
+                    Deny (Require Re-upload)
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs muted">
+                Approval actions are available after the student uploads a passport photo.
+              </p>
+            )}
+          </>
+        )}
+      </section>
 
       <section className="mt-6 grid gap-4 lg:grid-cols-2">
         <div className="surface p-5">
@@ -133,6 +242,7 @@ export default function AdminStudentsPage() {
               <thead className="border-b text-slate-600">
                 <tr>
                   <th className="py-2 pr-4">Username</th>
+                  <th className="py-2 pr-4">Verification</th>
                   <th className="py-2 pr-4">Credits</th>
                   <th className="py-2 pr-4">Owned Courses</th>
                   <th className="py-2 pr-0">Action</th>
@@ -144,6 +254,18 @@ export default function AdminStudentsPage() {
                     <td className="py-2 pr-4">
                       <div className="font-medium">{student.username}</div>
                       <div className="text-xs muted">{student.email || "no email"}</div>
+                      {student.full_name && <div className="text-xs muted">{student.full_name}</div>}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <span className={`rounded-full px-2 py-0.5 text-xs ${
+                        student.verification_status === "VERIFIED"
+                          ? "bg-emerald-100 text-emerald-700"
+                          : student.verification_status === "REJECTED"
+                            ? "bg-red-100 text-red-700"
+                            : "bg-amber-100 text-amber-700"
+                      }`}>
+                        {student.verification_status || "PENDING"}
+                      </span>
                     </td>
                     <td className="py-2 pr-4">{student.credits}</td>
                     <td className="py-2 pr-4">
@@ -172,7 +294,7 @@ export default function AdminStudentsPage() {
                 ))}
                 {students.length === 0 && (
                   <tr>
-                    <td className="py-3 text-sm muted" colSpan={4}>No students found.</td>
+                    <td className="py-3 text-sm muted" colSpan={5}>No students found.</td>
                   </tr>
                 )}
               </tbody>

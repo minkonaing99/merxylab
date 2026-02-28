@@ -3,7 +3,7 @@
 import Hls from "hls.js";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { API_ORIGIN, apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken, getOrCreateDeviceId } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
@@ -11,6 +11,8 @@ import { useAccessToken } from "@/hooks/use-access-token";
 type Lesson = {
   id: number;
   course_id: number;
+  course_title: string;
+  course_slug: string;
   title: string;
   content_type: "VIDEO" | "READING";
   reading_content: string;
@@ -36,6 +38,7 @@ type CourseLessonsPayload = {
 type ExamEligibility = {
   can_take_final_exam: boolean;
   final_exam_exists?: boolean;
+  next_step?: string;
 };
 
 export default function LessonPage() {
@@ -71,10 +74,15 @@ export default function LessonPage() {
     if (!lesson || !accessToken || !videoRef.current) return;
     const current = Math.floor(videoRef.current.currentTime || 0);
     const effectiveDuration = getEffectiveDuration();
+    const playbackCompleted =
+      effectiveDuration > 0 &&
+      (videoRef.current.ended || (videoRef.current.currentTime || 0) >= effectiveDuration);
     const completed =
       typeof completedOverride === "boolean"
         ? completedOverride
-        : effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95;
+        : lesson.has_quiz
+          ? effectiveDuration > 0 && (videoRef.current.currentTime || 0) >= effectiveDuration * 0.95
+          : playbackCompleted;
     persistLocalProgress(current);
     await apiFetch(
       `/lessons/${lesson.id}/progress/`,
@@ -113,13 +121,14 @@ export default function LessonPage() {
   }, [accessToken, pathname, router]);
 
   useEffect(() => {
-    if (!accessToken) {
+    const token = accessToken || getAccessToken();
+    if (!token) {
       return;
     }
     if (!Number.isFinite(lessonId)) {
       return;
     }
-    apiFetch<Lesson>(`/lessons/${lessonId}/`, {}, accessToken)
+    apiFetch<Lesson>(`/lessons/${lessonId}/`, {}, token)
       .then(setLesson)
       .catch((err) => {
         const message = err instanceof ApiError ? err.message : "Failed to load lesson.";
@@ -350,9 +359,151 @@ export default function LessonPage() {
     };
   }, [lesson, accessToken, getEffectiveDuration, persistLocalProgress, syncProgress]);
 
+  const renderReadingContent = (content: string) => {
+    const source = (content || "").trim();
+    if (!source) {
+      return <p className="muted">No reading content yet.</p>;
+    }
+
+    const lines = source.split(/\r?\n/);
+    const blocks: ReactNode[] = [];
+    let listItems: string[] = [];
+    let codeLines: string[] = [];
+    let codeLanguage = "";
+    let inCodeBlock = false;
+    let index = 0;
+
+    const flushList = () => {
+      if (listItems.length === 0) return;
+      blocks.push(
+        <ul key={`list-${index++}`} className="list-disc space-y-1 pl-6">
+          {listItems.map((item, itemIndex) => (
+            <li key={`list-item-${index}-${itemIndex}`}>{item}</li>
+          ))}
+        </ul>,
+      );
+      listItems = [];
+    };
+
+    const flushCode = () => {
+      if (codeLines.length === 0) return;
+      blocks.push(
+        <pre
+          key={`code-${index++}`}
+          className="overflow-x-auto rounded-xl border border-slate-300 bg-slate-900/95 p-4 text-sm text-slate-100"
+        >
+          <code data-lang={codeLanguage || undefined}>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      codeLines = [];
+      codeLanguage = "";
+    };
+
+    for (const rawLine of lines) {
+      const trimmed = rawLine.trim();
+
+      if (inCodeBlock) {
+        if (trimmed === "/code") {
+          flushCode();
+          inCodeBlock = false;
+          continue;
+        }
+        codeLines.push(rawLine);
+        continue;
+      }
+
+      if (trimmed.length === 0) {
+        flushList();
+        continue;
+      }
+
+      if (trimmed.startsWith("/code")) {
+        flushList();
+        inCodeBlock = true;
+        codeLanguage = trimmed.slice(5).trim();
+        codeLines = [];
+        continue;
+      }
+
+      if (trimmed.startsWith("/h1 ")) {
+        flushList();
+        blocks.push(
+          <h1 key={`h1-${index++}`} className="text-2xl font-semibold tracking-tight">
+            {trimmed.slice(4).trim()}
+          </h1>,
+        );
+        continue;
+      }
+
+      if (trimmed.startsWith("/h2 ")) {
+        flushList();
+        blocks.push(
+          <h2 key={`h2-${index++}`} className="text-xl font-semibold tracking-tight">
+            {trimmed.slice(4).trim()}
+          </h2>,
+        );
+        continue;
+      }
+
+      if (trimmed.startsWith("/l ")) {
+        listItems.push(trimmed.slice(3).trim());
+        continue;
+      }
+
+      if (trimmed.startsWith("/c ")) {
+        flushList();
+        blocks.push(
+          <p
+            key={`comment-${index++}`}
+            className="rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+          >
+            {trimmed.slice(3).trim()}
+          </p>,
+        );
+        continue;
+      }
+
+      if (trimmed.startsWith("/p ")) {
+        flushList();
+        blocks.push(
+          <p key={`p-${index++}`} className="leading-7">
+            {trimmed.slice(3).trim()}
+          </p>,
+        );
+        continue;
+      }
+
+      flushList();
+      blocks.push(
+        <p key={`text-${index++}`} className="leading-7">
+          {trimmed}
+        </p>,
+      );
+    }
+
+    flushList();
+    if (inCodeBlock) {
+      flushCode();
+    }
+
+    return <div className="space-y-3">{blocks}</div>;
+  };
+
   return (
     <main className="page-wrap fade-up">
-      {!accessToken && !getAccessToken() && <p className="text-sm muted">Redirecting to login...</p>}
+      {lesson && (
+        <nav className="mb-2 text-xs muted" aria-label="Breadcrumb">
+          <Link href="/dashboard" className="hover:underline">
+            Dashboard
+          </Link>
+          <span className="px-1">{">"}</span>
+          <Link href={`/courses/${lesson.course_slug}`} className="hover:underline">
+            {lesson.course_title}
+          </Link>
+          <span className="px-1">{">"}</span>
+          <span>{lesson.title}</span>
+        </nav>
+      )}
       {lesson && <h1 className="text-2xl font-semibold md:text-3xl">{lesson.title}</h1>}
       <p className="mt-2 text-sm muted">{lesson?.content_type === "READING" ? "Reading lesson" : status}</p>
       {error && <p className="mt-3 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
@@ -381,17 +532,10 @@ export default function LessonPage() {
         </div>
       ) : (
         <article className="surface prose mt-5 max-w-none p-5">
-          <div className="whitespace-pre-wrap">{lesson?.reading_content || "No reading content yet."}</div>
+          {renderReadingContent(lesson?.reading_content || "")}
         </article>
       )}
-      {lesson && lesson.has_quiz ? (
-        <Link
-          href={`/lessons/${lesson.id}/quiz`}
-          className="btn btn-primary mt-4"
-        >
-          Take Lesson Quiz
-        </Link>
-      ) : !nextLessonId && examEligibility?.can_take_final_exam ? (
+      {!nextLessonId && examEligibility?.can_take_final_exam ? (
         <button
           type="button"
           className="btn btn-primary mt-4"
@@ -403,6 +547,13 @@ export default function LessonPage() {
         >
           Take Final Exam
         </button>
+      ) : lesson && lesson.has_quiz ? (
+        <Link
+          href={`/lessons/${lesson.id}/quiz`}
+          className="btn btn-primary mt-4"
+        >
+          Take Lesson Quiz
+        </Link>
       ) : (
         <button
           type="button"
@@ -418,7 +569,7 @@ export default function LessonPage() {
       )}
       {!nextLessonId && !lesson?.has_quiz && examEligibility && !examEligibility.can_take_final_exam && (
         <p className="mt-2 text-xs muted">
-          Final exam is still locked or not published yet.
+          {examEligibility.next_step || "Final exam is still locked or not published yet."}
         </p>
       )}
     </main>

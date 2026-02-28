@@ -195,6 +195,11 @@ def _profile_completion_flags(profile):
     }
 
 
+def _is_profile_completed(profile):
+    flags = _profile_completion_flags(profile)
+    return all(flags.values()) and profile.verification_status == StudentProfile.VerificationStatus.VERIFIED
+
+
 def _wallet_for_user(user):
     wallet, _ = CreditWallet.objects.get_or_create(user=user, defaults={"balance_credits": 0})
     return wallet
@@ -254,7 +259,7 @@ def _final_exam_unlock_summary(user, course):
     completion = _course_completion_summary(user, course)
     profile, _ = StudentProfile.objects.get_or_create(user=user)
     profile_flags = _profile_completion_flags(profile)
-    profile_completed = all(profile_flags.values())
+    profile_completed = _is_profile_completed(profile)
     exam = FinalExam.objects.filter(course=course, is_published=True).first()
     exam_exists = exam is not None
     can_take_final_exam = completion["all_lessons_completed"] and exam_exists
@@ -307,6 +312,34 @@ def _lesson_asset_path(lesson, asset_name):
     if not target.exists() or not target.is_file():
         raise Http404("HLS asset not found.")
     return target
+
+
+def _remove_media_dir(path: Path):
+    try:
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        target = path.resolve()
+        if str(target).startswith(str(media_root)):
+            shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        # Best-effort cleanup; deleting DB records should still proceed.
+        pass
+
+
+def _cleanup_lesson_media_files(lesson):
+    # Primary deterministic folder used by upload pipeline.
+    _remove_media_dir(Path(settings.MEDIA_ROOT) / "hls" / f"course_{lesson.course_id}" / f"lesson_{lesson.id}")
+
+    # Secondary fallback if lesson path points to a different relative location.
+    if lesson.hls_master_path:
+        master_path = Path(lesson.hls_master_path)
+        if master_path.is_absolute():
+            _remove_media_dir(master_path.parent)
+        else:
+            _remove_media_dir((Path(settings.BASE_DIR) / master_path).parent)
+
+
+def _cleanup_course_media_files(course_id):
+    _remove_media_dir(Path(settings.MEDIA_ROOT) / "hls" / f"course_{course_id}")
 
 
 def _resolve_binary(explicit_path, command_name):
@@ -397,12 +430,13 @@ def me(request):
         {
             "id": user.id,
             "username": user.username,
+            "full_name": profile.full_name,
             "email": user.email,
             "is_staff": user.is_staff,
             "is_superuser": user.is_superuser,
             "groups": list(user.groups.values_list("name", flat=True)),
             "role": _role_for_user(user),
-            "profile_completed": all(profile_flags.values()),
+            "profile_completed": _is_profile_completed(profile),
             "credits": wallet.balance_credits,
         }
     )
@@ -418,7 +452,7 @@ def my_profile(request):
         payload = serializer.data
         payload["credits"] = wallet.balance_credits
         payload["completion_flags"] = _profile_completion_flags(profile)
-        payload["profile_completed"] = all(payload["completion_flags"].values())
+        payload["profile_completed"] = _is_profile_completed(profile)
         return Response(payload)
 
     serializer = StudentProfileSerializer(
@@ -429,10 +463,25 @@ def my_profile(request):
     )
     serializer.is_valid(raise_exception=True)
     serializer.save()
+
+    # Any student update to identity/passport details returns profile to pending review.
+    if request.method in ("PUT", "PATCH"):
+        updated_identity_fields = {
+            "full_name",
+            "date_of_birth",
+            "passport_number",
+            "passport_photo",
+        }
+        has_identity_update = any(field in serializer.validated_data for field in updated_identity_fields)
+        if has_identity_update:
+            profile.verification_status = StudentProfile.VerificationStatus.PENDING
+            profile.verification_note = ""
+            profile.save(update_fields=["verification_status", "verification_note", "updated_at"])
+
     payload = serializer.data
     payload["credits"] = wallet.balance_credits
     payload["completion_flags"] = _profile_completion_flags(profile)
-    payload["profile_completed"] = all(payload["completion_flags"].values())
+    payload["profile_completed"] = _is_profile_completed(profile)
     return Response(payload)
 
 
@@ -462,9 +511,22 @@ def course_detail(request, course_slug):
     )
     is_enrolled = _is_enrolled(request.user, course)
     unlocked_ids = _unlocked_lesson_ids(request.user, course)
+    quiz_status_by_lesson = {}
+    if request.user.is_authenticated and is_enrolled:
+        attempts = QuizAttempt.objects.filter(user=request.user, lesson__course=course).values("lesson_id", "passed")
+        for row in attempts:
+            lesson_id = row["lesson_id"]
+            if row["passed"]:
+                quiz_status_by_lesson[lesson_id] = "PASSED"
+            elif quiz_status_by_lesson.get(lesson_id) != "PASSED":
+                quiz_status_by_lesson[lesson_id] = "FAILED"
     serializer = CourseDetailSerializer(
         course,
-        context={"is_enrolled": is_enrolled, "unlocked_lesson_ids": unlocked_ids},
+        context={
+            "is_enrolled": is_enrolled,
+            "unlocked_lesson_ids": unlocked_ids,
+            "quiz_status_by_lesson": quiz_status_by_lesson,
+        },
     )
     payload = serializer.data
     payload["enrolled"] = is_enrolled
@@ -1147,6 +1209,11 @@ def admin_course_detail(request, course_id):
     course = get_object_or_404(Course, id=course_id)
 
     if request.method == "DELETE":
+        lessons = list(Lesson.objects.filter(course=course).only("id", "course_id", "hls_master_path"))
+        for lesson in lessons:
+            delete_quiz_payload(lesson)
+            _cleanup_lesson_media_files(lesson)
+        _cleanup_course_media_files(course.id)
         course.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1162,6 +1229,8 @@ def admin_lesson_detail(request, lesson_id):
     lesson = get_object_or_404(Lesson, id=lesson_id)
 
     if request.method == "DELETE":
+        delete_quiz_payload(lesson)
+        _cleanup_lesson_media_files(lesson)
         lesson.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1243,12 +1312,16 @@ def admin_students(request):
         role = _role_for_user(user)
         if role != "student":
             continue
+        profile, _ = StudentProfile.objects.get_or_create(user=user)
         wallet = _wallet_for_user(user)
         rows.append(
             {
                 "user_id": user.id,
                 "username": user.username,
                 "email": user.email or "",
+                "full_name": profile.full_name,
+                "verification_status": profile.verification_status,
+                "has_passport_photo": bool(profile.passport_photo),
                 "role": role,
                 "credits": wallet.balance_credits,
                 "enrollments": Enrollment.objects.filter(user=user).count(),
@@ -1260,6 +1333,73 @@ def admin_students(request):
             }
         )
     return Response(AdminStudentListRowSerializer(rows, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_profile(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+    profile, _ = StudentProfile.objects.get_or_create(user=student)
+    profile_payload = StudentProfileSerializer(profile, context={"request": request}).data
+    profile_payload["completion_flags"] = _profile_completion_flags(profile)
+    profile_payload["profile_completed"] = _is_profile_completed(profile)
+    return Response(
+        {
+            "student": {
+                "id": student.id,
+                "username": student.username,
+                "email": student.email or "",
+            },
+            "profile": profile_payload,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_profile_review(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+    profile, _ = StudentProfile.objects.get_or_create(user=student)
+
+    action = str(request.data.get("action", "")).strip().lower()
+    note = str(request.data.get("note", "")).strip()
+    if action not in ("approve", "deny"):
+        return Response({"detail": "action must be either 'approve' or 'deny'."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if action == "approve":
+        profile.verification_status = StudentProfile.VerificationStatus.VERIFIED
+        profile.verification_note = note
+        profile.save(update_fields=["verification_status", "verification_note", "updated_at"])
+        detail = "Student profile approved."
+    else:
+        if profile.passport_photo:
+            profile.passport_photo.delete(save=False)
+        profile.passport_photo = ""
+        profile.verification_status = StudentProfile.VerificationStatus.REJECTED
+        profile.verification_note = note or "Verification denied. Please re-upload passport photo."
+        profile.save(update_fields=["passport_photo", "verification_status", "verification_note", "updated_at"])
+        detail = "Student profile denied. Passport photo cleared."
+
+    profile_payload = StudentProfileSerializer(profile, context={"request": request}).data
+    profile_payload["completion_flags"] = _profile_completion_flags(profile)
+    profile_payload["profile_completed"] = _is_profile_completed(profile)
+    return Response(
+        {
+            "detail": detail,
+            "student": {
+                "id": student.id,
+                "username": student.username,
+                "email": student.email or "",
+            },
+            "profile": profile_payload,
+        }
+    )
 
 
 @api_view(["GET"])

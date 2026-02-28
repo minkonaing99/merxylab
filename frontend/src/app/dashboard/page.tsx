@@ -9,6 +9,7 @@ import { useAccessToken } from "@/hooks/use-access-token";
 
 type MePayload = {
   username: string;
+  full_name?: string;
   role: string;
   email: string;
   credits?: number;
@@ -97,14 +98,13 @@ export default function DashboardPage() {
 
   const enrolledCourseIds = new Set(enrollments.map((item) => item.course.id));
   const availableCourses = catalog.filter((course) => !enrolledCourseIds.has(course.id));
+  const dashboardName = (me?.full_name || "").trim() || me?.username || "Student";
 
   return (
     <main className="page-wrap fade-up">
-      <h1 className="text-3xl font-semibold md:text-4xl">Student Dashboard</h1>
+      <h1 className="text-3xl font-semibold md:text-4xl">{dashboardName}&apos;s Dashboard</h1>
       {me && (
-        <p className="mt-2 text-sm muted">
-          Signed in as <strong>{me.username}</strong> ({me.role}) | Credits: <strong>{me.credits ?? 0}</strong>
-        </p>
+        <p className="mt-2 text-sm muted">Credits: <strong>{me.credits ?? 0}</strong></p>
       )}
       {me && !me.profile_completed && (
         <div className="mt-4 rounded-lg border border-amber-300 bg-amber-500/10 p-3 text-sm">

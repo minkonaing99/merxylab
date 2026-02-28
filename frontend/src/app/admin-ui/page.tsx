@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
+import { setTheme } from "@/lib/theme";
 
 type Course = {
   id: number;
@@ -114,6 +115,29 @@ type FeedbackTarget =
   | "manage-quiz";
 
 type AdminView = "build" | "manage" | "insights";
+const COURSE_LEVEL_OPTIONS = ["Beginner", "Intermediate", "Advanced"] as const;
+const FINAL_EXAM_JSON_SAMPLE = `[
+  {
+    "question": "What happens if you call pop() on an empty list?",
+    "choices": {
+      "A": "Returns None",
+      "B": "Returns 0",
+      "C": "Raises an error",
+      "D": "Removes the last element"
+    },
+    "correct": "C"
+  },
+  {
+    "question": "Which of the following best describes a stack?",
+    "choices": {
+      "A": "You can access any element directly",
+      "B": "Only the top element can be accessed",
+      "C": "Items are sorted automatically",
+      "D": "It stores only numbers"
+    },
+    "correct": "B"
+  }
+]`;
 
 export default function AdminUiPage() {
   const router = useRouter();
@@ -137,6 +161,7 @@ export default function AdminUiPage() {
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
   const [selectedLessonIdForVideo, setSelectedLessonIdForVideo] = useState<number | null>(null);
   const [selectedLessonIdForQuiz, setSelectedLessonIdForQuiz] = useState<number | null>(null);
+  const [step3ReadingContent, setStep3ReadingContent] = useState("");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "processing">("idle");
@@ -216,7 +241,13 @@ export default function AdminUiPage() {
       },
     ] as FinalExamQuestionForm[],
   });
+  const [finalExamInputMode, setFinalExamInputMode] = useState<"manual" | "json">("manual");
+  const [finalExamJsonInput, setFinalExamJsonInput] = useState(FINAL_EXAM_JSON_SAMPLE);
   const [finalExamExists, setFinalExamExists] = useState(false);
+
+  useEffect(() => {
+    setTheme("light");
+  }, []);
 
   const selectedCourseSections = useMemo(
     () => sections.filter((section) => section.course_id === selectedCourseId),
@@ -226,19 +257,44 @@ export default function AdminUiPage() {
     () => lessons.filter((lesson) => lesson.course_id === selectedCourseId),
     [lessons, selectedCourseId],
   );
+  const selectedStep3Lesson = useMemo(
+    () => selectedCourseLessons.find((lesson) => lesson.id === selectedLessonIdForVideo) ?? null,
+    [selectedCourseLessons, selectedLessonIdForVideo],
+  );
+  const step3Mode = selectedStep3Lesson?.content_type ?? lessonForm.content_type;
+  const step3DraftReadingContent = lessonForm.reading_content;
+  const selectedCourseLessonIds = useMemo(
+    () => new Set(selectedCourseLessons.map((lesson) => lesson.id)),
+    [selectedCourseLessons],
+  );
+  const selectedCourseQuizzes = useMemo(
+    () => quizzes.filter((quiz) => selectedCourseLessonIds.has(quiz.lesson_id)),
+    [quizzes, selectedCourseLessonIds],
+  );
   const hasUploadedVideo = useMemo(
-    () => lessons.some((lesson) => Boolean(lesson.hls_master_path)),
-    [lessons],
+    () => selectedCourseLessons.some((lesson) => Boolean(lesson.hls_master_path)),
+    [selectedCourseLessons],
   );
   const workflowStatus = useMemo(
-    () => ({
-      step1: courses.length > 0,
-      step2: lessons.length > 0,
-      step3: hasUploadedVideo,
-      step4: quizzes.length > 0,
-      step5: finalExamExists,
-    }),
-    [courses.length, finalExamExists, hasUploadedVideo, lessons.length, quizzes.length],
+    () => {
+      if (!selectedCourseId) {
+        return {
+          step1: false,
+          step2: false,
+          step3: false,
+          step4: false,
+          step5: false,
+        };
+      }
+      return {
+        step1: true,
+        step2: selectedCourseLessons.length > 0,
+        step3: hasUploadedVideo,
+        step4: selectedCourseQuizzes.length > 0,
+        step5: finalExamExists,
+      };
+    },
+    [selectedCourseId, selectedCourseLessons.length, hasUploadedVideo, selectedCourseQuizzes.length, finalExamExists],
   );
 
   const loadFinalExamForCourse = useCallback(
@@ -354,6 +410,14 @@ export default function AdminUiPage() {
   }, [accessToken, isAdmin, selectedCourseId]);
 
   useEffect(() => {
+    if (!selectedStep3Lesson || selectedStep3Lesson.content_type !== "READING") {
+      setStep3ReadingContent("");
+      return;
+    }
+    setStep3ReadingContent(selectedStep3Lesson.reading_content || "");
+  }, [selectedStep3Lesson]);
+
+  useEffect(() => {
     if (!accessToken || selectedCourseId == null || isAdmin !== true) {
       setFinalExamExists(false);
       setFinalExamForm({
@@ -456,7 +520,9 @@ export default function AdminUiPage() {
           payload.section_title = lessonForm.section_title;
           payload.section_order = lessonForm.section_order;
         }
-        await apiFetch("/admin/lessons/", { method: "POST", body: JSON.stringify(payload) }, accessToken);
+        const createdLesson = await apiFetch<Lesson>("/admin/lessons/", { method: "POST", body: JSON.stringify(payload) }, accessToken);
+        setSelectedLessonIdForVideo(createdLesson.id);
+        setSelectedLessonIdForQuiz(createdLesson.id);
         setLessonForm({
           section_id: "",
           section_title: "",
@@ -527,6 +593,28 @@ export default function AdminUiPage() {
         setUploadPhase("idle");
       }, 1200);
     }
+  };
+
+  const saveStep3Reading = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!accessToken || !selectedStep3Lesson || selectedStep3Lesson.content_type !== "READING") return;
+    await runAction(
+      async () => {
+        await apiFetch(
+          `/admin/lessons/${selectedStep3Lesson.id}/`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              content_type: "READING",
+              reading_content: step3ReadingContent,
+            }),
+          },
+          accessToken,
+        );
+      },
+      "Reading content saved.",
+      "step3-upload",
+    );
   };
 
   const addQuestion = () => {
@@ -783,11 +871,103 @@ export default function AdminUiPage() {
     });
   };
 
+  const parseFinalExamJson = (rawJson: string): FinalExamQuestionForm[] => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      throw new Error("Invalid JSON format. Please check brackets, commas, and quotes.");
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error("JSON must be a non-empty array of questions.");
+    }
+
+    return parsed.map((entry, qIndex) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error(`Question #${qIndex + 1} is invalid.`);
+      }
+      const row = entry as Record<string, unknown>;
+      const prompt = typeof row.question === "string" ? row.question.trim() : "";
+      if (!prompt) {
+        throw new Error(`Question #${qIndex + 1} must include a non-empty 'question' text.`);
+      }
+
+      const choicesRaw = row.choices;
+      if (!choicesRaw || typeof choicesRaw !== "object" || Array.isArray(choicesRaw)) {
+        throw new Error(`Question #${qIndex + 1} must include 'choices' as an object (A/B/C...).`);
+      }
+      const choiceEntries = Object.entries(choicesRaw as Record<string, unknown>).filter(
+        ([, value]) => typeof value === "string" && value.trim().length > 0,
+      );
+      if (choiceEntries.length < 2) {
+        throw new Error(`Question #${qIndex + 1} needs at least 2 non-empty choices.`);
+      }
+
+      const correctRaw = typeof row.correct === "string" ? row.correct.trim().toUpperCase() : "";
+      if (!correctRaw) {
+        throw new Error(`Question #${qIndex + 1} must include 'correct' (example: "B").`);
+      }
+      const normalizedChoices = choiceEntries.map(([key, value], cIndex) => ({
+        key: key.trim().toUpperCase() || String.fromCharCode(65 + cIndex),
+        text: String(value).trim(),
+      }));
+      const hasCorrect = normalizedChoices.some((choice) => choice.key === correctRaw);
+      if (!hasCorrect) {
+        throw new Error(
+          `Question #${qIndex + 1} has 'correct': "${correctRaw}" that does not match provided choice keys.`,
+        );
+      }
+
+      return {
+        prompt,
+        order: qIndex + 1,
+        choices: normalizedChoices.map((choice, cIndex) => ({
+          text: choice.text,
+          is_correct: choice.key === correctRaw,
+          order: cIndex + 1,
+        })),
+      };
+    });
+  };
+
+  const importFinalExamJson = () => {
+    try {
+      const importedQuestions = parseFinalExamJson(finalExamJsonInput);
+      setFinalExamForm((prev) => ({ ...prev, questions: importedQuestions }));
+      setFeedback({
+        target: "step5-final-exam",
+        type: "success",
+        message: `Imported ${importedQuestions.length} questions from JSON.`,
+      });
+    } catch (err) {
+      setFeedback({
+        target: "step5-final-exam",
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to import JSON questions.",
+      });
+    }
+  };
+
   const saveFinalExam = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!accessToken || !selectedCourseId) return;
 
-    const validQuestions = finalExamForm.questions.every((question) => {
+    let questionsToSave = finalExamForm.questions;
+    if (finalExamInputMode === "json") {
+      try {
+        questionsToSave = parseFinalExamJson(finalExamJsonInput);
+      } catch (err) {
+        setFeedback({
+          target: "step5-final-exam",
+          type: "error",
+          message: err instanceof Error ? err.message : "Invalid final exam JSON.",
+        });
+        return;
+      }
+      setFinalExamForm((prev) => ({ ...prev, questions: questionsToSave }));
+    }
+
+    const validQuestions = questionsToSave.every((question) => {
       const hasCorrect = question.choices.some((choice) => choice.is_correct);
       const hasMinChoices = question.choices.length >= 2;
       return hasCorrect && hasMinChoices;
@@ -808,7 +988,7 @@ export default function AdminUiPage() {
           passing_score: finalExamForm.passing_score,
           time_limit_sec: finalExamForm.time_limit_sec ? Number(finalExamForm.time_limit_sec) : null,
           is_published: finalExamForm.is_published,
-          questions: finalExamForm.questions.map((question, qIndex) => ({
+          questions: questionsToSave.map((question, qIndex) => ({
             prompt: question.prompt,
             order: qIndex + 1,
             choices: question.choices.map((choice, cIndex) => ({
@@ -889,11 +1069,11 @@ export default function AdminUiPage() {
   };
 
   if (isAdmin === null) {
-    return <main className="mx-auto w-full max-w-6xl px-4 py-8">Checking access...</main>;
+    return <main className="admin-theme-scope mx-auto w-full max-w-6xl px-4 py-8">Checking access...</main>;
   }
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-8">
+    <main className="admin-theme-scope mx-auto w-full max-w-6xl px-4 py-8">
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -1011,21 +1191,6 @@ export default function AdminUiPage() {
       )}
 
       {activeView === "build" && <section className="mt-6 grid gap-4 lg:grid-cols-2">
-        <form onSubmit={createCourse} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Step 1: Create Course</h2>
-          <input className="mt-3 w-full rounded border px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(e) => setCourseForm((v) => ({ ...v, title: e.target.value }))} required />
-          <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Course slug (example: python-basics)" value={courseForm.slug} onChange={(e) => setCourseForm((v) => ({ ...v, slug: e.target.value }))} required />
-          <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Level (Beginner/Intermediate)" value={courseForm.level} onChange={(e) => setCourseForm((v) => ({ ...v, level: e.target.value }))} />
-          <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
-          <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
-            Publish immediately
-          </label>
-          <button disabled={loading} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white">Create Course</button>
-          {renderFeedback("step1-course")}
-        </form>
-
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Build Workflow Checklist</h2>
           <ul className="mt-3 space-y-2 text-sm">
@@ -1052,8 +1217,36 @@ export default function AdminUiPage() {
           </ul>
         </div>
 
+        <form onSubmit={createCourse} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="text-lg font-semibold">Step 1: Create Course</h2>
+          <p className="mt-2 text-xs text-slate-500">
+            Select a difficulty level so students can understand the course depth before enrolling.
+          </p>
+          <input className="mt-3 w-full rounded border px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(e) => setCourseForm((v) => ({ ...v, title: e.target.value }))} required />
+          <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Course slug (example: python-basics)" value={courseForm.slug} onChange={(e) => setCourseForm((v) => ({ ...v, slug: e.target.value }))} required />
+          <label className="mt-2 block text-xs text-slate-600">Course level</label>
+          <select className="mt-1 w-full rounded border px-3 py-2" value={courseForm.level} onChange={(e) => setCourseForm((v) => ({ ...v, level: e.target.value }))}>
+            {COURSE_LEVEL_OPTIONS.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+          <input type="number" min={0} className="mt-2 w-full rounded border px-3 py-2" placeholder="Required credits to enroll" value={courseForm.price_cents} onChange={(e) => setCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} />
+          <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
+          <label className="mt-2 flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
+            Publish immediately
+          </label>
+          <button disabled={loading} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white">Create Course</button>
+          {renderFeedback("step1-course")}
+        </form>
+
         <form onSubmit={createLesson} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Step 2: Add Lesson</h2>
+          <p className="mt-2 text-xs text-slate-500">
+            `Section order` sets section position in the course. `Lesson order` sets lesson position for students.
+          </p>
           <select className="mt-3 w-full rounded border px-3 py-2" value={lessonForm.section_id} onChange={(e) => setLessonForm((v) => ({ ...v, section_id: e.target.value }))}>
             <option value="">Create new section below</option>
             {selectedCourseSections.map((section) => (
@@ -1065,23 +1258,21 @@ export default function AdminUiPage() {
           {!lessonForm.section_id && (
             <>
               <input className="mt-2 w-full rounded border px-3 py-2" placeholder="New section title" value={lessonForm.section_title} onChange={(e) => setLessonForm((v) => ({ ...v, section_title: e.target.value }))} required />
-              <input type="number" min={1} className="mt-2 w-full rounded border px-3 py-2" placeholder="Section order" value={lessonForm.section_order} onChange={(e) => setLessonForm((v) => ({ ...v, section_order: Number(e.target.value) }))} required />
+              <label className="mt-2 block text-xs text-slate-600">Section order (1 = first section)</label>
+              <input type="number" min={1} className="mt-1 w-full rounded border px-3 py-2" placeholder="Example: 1" value={lessonForm.section_order} onChange={(e) => setLessonForm((v) => ({ ...v, section_order: Number(e.target.value) }))} required />
             </>
           )}
           <input className="mt-2 w-full rounded border px-3 py-2" placeholder="Lesson title" value={lessonForm.title} onChange={(e) => setLessonForm((v) => ({ ...v, title: e.target.value }))} required />
-          <input type="number" min={1} className="mt-2 w-full rounded border px-3 py-2" placeholder="Lesson order" value={lessonForm.order} onChange={(e) => setLessonForm((v) => ({ ...v, order: Number(e.target.value) }))} required />
+          <label className="mt-2 block text-xs text-slate-600">Lesson order (1 = first lesson)</label>
+          <input type="number" min={1} className="mt-1 w-full rounded border px-3 py-2" placeholder="Example: 1" value={lessonForm.order} onChange={(e) => setLessonForm((v) => ({ ...v, order: Number(e.target.value) }))} required />
           <select className="mt-2 w-full rounded border px-3 py-2" value={lessonForm.content_type} onChange={(e) => setLessonForm((v) => ({ ...v, content_type: e.target.value as "VIDEO" | "READING" }))}>
             <option value="VIDEO">Video Lesson</option>
             <option value="READING">Reading Lesson</option>
           </select>
           {lessonForm.content_type === "READING" && (
-            <textarea
-              className="mt-2 w-full rounded border px-3 py-2"
-              placeholder="Reading content"
-              value={lessonForm.reading_content}
-              onChange={(e) => setLessonForm((v) => ({ ...v, reading_content: e.target.value }))}
-              required
-            />
+            <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              Reading editor moved to Step 3. Save this lesson, then use Step 3 to write formatted reading content.
+            </p>
           )}
           <label className="mt-2 flex items-center gap-2 text-sm">
             <input type="checkbox" checked={lessonForm.is_preview} onChange={(e) => setLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
@@ -1091,49 +1282,87 @@ export default function AdminUiPage() {
           {renderFeedback("step2-lesson")}
         </form>
 
-        <form onSubmit={uploadVideo} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Step 3: Upload Lesson Video</h2>
+        <form onSubmit={step3Mode === "READING" && selectedStep3Lesson ? saveStep3Reading : uploadVideo} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="text-lg font-semibold">
+            {step3Mode === "READING" ? "Step 3: Edit Reading Content" : "Step 3: Upload Lesson Video"}
+          </h2>
           <select
-            className="mt-3 w-full rounded border px-3 py-2"
+            className="mt-3 w-full rounded border px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60"
             value={selectedLessonIdForVideo ?? ""}
             onChange={(e) => setSelectedLessonIdForVideo(e.target.value ? Number(e.target.value) : null)}
+            disabled={step3Mode === "READING"}
           >
             <option value="">Select lesson</option>
-            {selectedCourseLessons.filter((lesson) => lesson.content_type === "VIDEO").map((lesson) => (
+            {selectedCourseLessons.map((lesson) => (
               <option key={lesson.id} value={lesson.id}>
-                {lesson.title} ({lesson.section_title})
+                {lesson.title} ({lesson.section_title}) [{lesson.content_type}]
               </option>
             ))}
           </select>
-          <label
-            className={`mt-3 flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-8 text-center ${
-              dragOver ? "border-amber-600 bg-amber-50" : "border-slate-300 bg-slate-50"
-            }`}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragOver(false);
-              setVideoFile(e.dataTransfer.files?.[0] ?? null);
-            }}
-          >
-            <input
-              type="file"
-              accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm"
-              className="hidden"
-              onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)}
-            />
-            <p className="text-sm font-medium text-slate-800">Drag video here or click to choose</p>
-            <p className="mt-1 text-xs text-slate-500">Supported: mp4, mov, mkv, webm</p>
-            {videoFile && <p className="mt-2 text-xs text-emerald-700">Selected: {videoFile.name}</p>}
-          </label>
-          <button disabled={loading || !videoFile || !selectedLessonIdForVideo} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
-            {loading ? "Processing..." : "Upload & Convert"}
-          </button>
-          {(uploadProgress > 0 || (loading && Boolean(videoFile) && Boolean(selectedLessonIdForVideo))) && (
+          {step3Mode === "READING" ? (
+            <>
+              <p className="mt-3 text-xs text-slate-500">
+                {selectedStep3Lesson
+                  ? "Edit reading text here. Slash commands are supported (`/h1`, `/h2`, `/p`, `/l`, `/c`, `/code`)."
+                  : "Reading mode detected from Step 2. Save lesson first, then Step 3 will store updates to that lesson."}
+              </p>
+              <textarea
+                className="mt-2 min-h-[220px] w-full rounded border px-3 py-2 font-mono text-sm"
+                value={selectedStep3Lesson ? step3ReadingContent : step3DraftReadingContent}
+                onChange={(e) => {
+                  if (selectedStep3Lesson) {
+                    setStep3ReadingContent(e.target.value);
+                    return;
+                  }
+                  setLessonForm((prev) => ({ ...prev, reading_content: e.target.value }));
+                }}
+                placeholder="Write lesson reading content..."
+              />
+              {selectedStep3Lesson ? (
+                <button disabled={loading || !selectedStep3Lesson} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
+                  {loading ? "Saving..." : "Save Reading Content"}
+                </button>
+              ) : (
+                <button type="button" disabled className="mt-3 rounded border border-slate-300 bg-slate-50 px-4 py-2 text-sm text-slate-500">
+                  Save Lesson in Step 2 First
+                </button>
+              )}
+            </>
+          ) : selectedStep3Lesson?.content_type === "VIDEO" ? (
+            <>
+              <label
+                className={`mt-3 flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-8 text-center ${
+                  dragOver ? "border-amber-600 bg-amber-50" : "border-slate-300 bg-slate-50"
+                }`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  setVideoFile(e.dataTransfer.files?.[0] ?? null);
+                }}
+              >
+                <input
+                  type="file"
+                  accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm"
+                  className="hidden"
+                  onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)}
+                />
+                <p className="text-sm font-medium text-slate-800">Drag video here or click to choose</p>
+                <p className="mt-1 text-xs text-slate-500">Supported: mp4, mov, mkv, webm</p>
+                {videoFile && <p className="mt-2 text-xs text-emerald-700">Selected: {videoFile.name}</p>}
+              </label>
+              <button disabled={loading || !videoFile || !selectedLessonIdForVideo} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
+                {loading ? "Processing..." : "Upload & Convert"}
+              </button>
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">Select a lesson to continue.</p>
+          )}
+          {(uploadProgress > 0 || (loading && Boolean(videoFile) && selectedStep3Lesson?.content_type === "VIDEO")) && (
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
                 <span>
@@ -1155,6 +1384,9 @@ export default function AdminUiPage() {
 
         <form onSubmit={createQuiz} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
           <h2 className="text-lg font-semibold">Step 4: Build Quiz</h2>
+          <p className="mt-2 text-xs text-slate-500">
+            Passing score means the minimum percentage required to pass this lesson quiz. Default is 70%.
+          </p>
           <select
             className="mt-3 w-full rounded border px-3 py-2"
             value={selectedLessonIdForQuiz ?? ""}
@@ -1168,7 +1400,7 @@ export default function AdminUiPage() {
             ))}
           </select>
           <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <input type="number" min={0} max={100} className="w-full rounded border px-3 py-2" value={quizForm.passing_score} onChange={(e) => setQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} placeholder="Passing score (0-100)" />
+            <input type="number" min={0} max={100} className="w-full rounded border px-3 py-2" value={quizForm.passing_score} onChange={(e) => setQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} placeholder="Passing score in % (default: 70)" />
             <input type="number" min={1} className="w-full rounded border px-3 py-2" value={quizForm.time_limit_sec} onChange={(e) => setQuizForm((v) => ({ ...v, time_limit_sec: e.target.value }))} placeholder="Time limit in seconds (optional)" />
           </div>
 
@@ -1231,7 +1463,7 @@ export default function AdminUiPage() {
                   className="w-full rounded border px-3 py-2"
                   value={finalExamForm.passing_score}
                   onChange={(e) => setFinalExamForm((v) => ({ ...v, passing_score: Number(e.target.value) }))}
-                  placeholder="Passing score"
+                  placeholder="Final exam passing score in % (default: 70)"
                 />
                 <input
                   type="number"
@@ -1242,6 +1474,25 @@ export default function AdminUiPage() {
                   placeholder="Time limit in sec (optional)"
                 />
               </div>
+              <p className="mt-2 text-xs text-slate-500">
+                Final exam passing score is the minimum percentage needed for course completion and certificate issuance.
+              </p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setFinalExamInputMode("manual")}
+                  className={`rounded border px-3 py-2 text-sm ${finalExamInputMode === "manual" ? "bg-slate-900 text-white" : "border-slate-300"}`}
+                >
+                  Manual Questions
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFinalExamInputMode("json")}
+                  className={`rounded border px-3 py-2 text-sm ${finalExamInputMode === "json" ? "bg-slate-900 text-white" : "border-slate-300"}`}
+                >
+                  Import JSON
+                </button>
+              </div>
               <label className="mt-2 flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -1251,49 +1502,73 @@ export default function AdminUiPage() {
                 Publish final exam
               </label>
 
-              <div className="mt-4 space-y-3">
-                {finalExamForm.questions.map((question, qIndex) => (
-                  <div key={qIndex} className="rounded-lg border border-slate-200 p-3">
-                    <input
-                      className="w-full rounded border px-3 py-2"
-                      placeholder={`Final exam question ${qIndex + 1}`}
-                      value={question.prompt}
-                      onChange={(e) => updateFinalExamQuestion(qIndex, { prompt: e.target.value })}
-                    />
-                    <div className="mt-2 space-y-2">
-                      {question.choices.map((choice, cIndex) => (
-                        <div key={cIndex} className="flex items-center gap-2">
-                          <input
-                            className="flex-1 rounded border px-3 py-2"
-                            placeholder={`Choice ${cIndex + 1}`}
-                            value={choice.text}
-                            onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { text: e.target.value })}
-                          />
-                          <label className="flex items-center gap-1 text-xs">
+              {finalExamInputMode === "manual" ? (
+                <div className="mt-4 space-y-3">
+                  {finalExamForm.questions.map((question, qIndex) => (
+                    <div key={qIndex} className="rounded-lg border border-slate-200 p-3">
+                      <input
+                        className="w-full rounded border px-3 py-2"
+                        placeholder={`Final exam question ${qIndex + 1}`}
+                        value={question.prompt}
+                        onChange={(e) => updateFinalExamQuestion(qIndex, { prompt: e.target.value })}
+                      />
+                      <div className="mt-2 space-y-2">
+                        {question.choices.map((choice, cIndex) => (
+                          <div key={cIndex} className="flex items-center gap-2">
                             <input
-                              type="checkbox"
-                              checked={choice.is_correct}
-                              onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { is_correct: e.target.checked })}
+                              className="flex-1 rounded border px-3 py-2"
+                              placeholder={`Choice ${cIndex + 1}`}
+                              value={choice.text}
+                              onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { text: e.target.value })}
                             />
-                            Correct
-                          </label>
-                        </div>
-                      ))}
+                            <label className="flex items-center gap-1 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={choice.is_correct}
+                                onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { is_correct: e.target.checked })}
+                              />
+                              Correct
+                            </label>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => addFinalExamChoice(qIndex)}
+                        className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        + Add Choice
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => addFinalExamChoice(qIndex)}
-                      className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs"
-                    >
-                      + Add Choice
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4">
+                  <p className="mb-2 text-xs text-slate-500">
+                    Paste JSON in this format: question, choices object (A/B/C...), and correct key.
+                  </p>
+                  <textarea
+                    className="min-h-[260px] w-full rounded border px-3 py-2 font-mono text-xs"
+                    value={finalExamJsonInput}
+                    onChange={(e) => setFinalExamJsonInput(e.target.value)}
+                    spellCheck={false}
+                  />
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button type="button" onClick={importFinalExamJson} className="rounded border border-slate-300 px-3 py-1.5 text-sm">
+                      Parse JSON
                     </button>
+                    <span className="text-xs text-slate-500 self-center">
+                      Parsed questions in form: {finalExamForm.questions.length}
+                    </span>
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap gap-2">
-                <button type="button" onClick={addFinalExamQuestion} className="rounded border border-slate-300 px-3 py-1.5 text-sm">
-                  + Add Question
-                </button>
+                {finalExamInputMode === "manual" && (
+                  <button type="button" onClick={addFinalExamQuestion} className="rounded border border-slate-300 px-3 py-1.5 text-sm">
+                    + Add Question
+                  </button>
+                )}
                 <button disabled={loading || selectedCourseId == null} className="rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60">
                   {finalExamExists ? "Update Final Exam" : "Create Final Exam"}
                 </button>
@@ -1345,7 +1620,13 @@ export default function AdminUiPage() {
               <form onSubmit={saveCourseEdits} className="mt-3 space-y-2">
                 <input className="w-full rounded border px-3 py-2" value={editCourseForm.title} onChange={(e) => setEditCourseForm((v) => ({ ...v, title: e.target.value }))} />
                 <input className="w-full rounded border px-3 py-2" value={editCourseForm.slug} onChange={(e) => setEditCourseForm((v) => ({ ...v, slug: e.target.value }))} />
-                <input className="w-full rounded border px-3 py-2" value={editCourseForm.level} onChange={(e) => setEditCourseForm((v) => ({ ...v, level: e.target.value }))} />
+                <select className="w-full rounded border px-3 py-2" value={editCourseForm.level} onChange={(e) => setEditCourseForm((v) => ({ ...v, level: e.target.value }))}>
+                  {COURSE_LEVEL_OPTIONS.map((level) => (
+                    <option key={level} value={level}>
+                      {level}
+                    </option>
+                  ))}
+                </select>
                 <input type="number" min={0} className="w-full rounded border px-3 py-2" value={editCourseForm.price_cents} onChange={(e) => setEditCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} placeholder="Required credits to enroll" />
                 <textarea className="w-full rounded border px-3 py-2" value={editCourseForm.description} onChange={(e) => setEditCourseForm((v) => ({ ...v, description: e.target.value }))} />
                 <label className="flex items-center gap-2 text-sm">
@@ -1421,7 +1702,12 @@ export default function AdminUiPage() {
                   <option value="READING">Reading Lesson</option>
                 </select>
                 {editLessonForm.content_type === "READING" && (
-                  <textarea className="w-full rounded border px-3 py-2" value={editLessonForm.reading_content} onChange={(e) => setEditLessonForm((v) => ({ ...v, reading_content: e.target.value }))} />
+                  <>
+                    <p className="text-xs text-slate-500">
+                      Slash commands supported: `/h1`, `/h2`, `/p`, `/l`, `/c`, `/code` ... `/code`.
+                    </p>
+                    <textarea className="w-full rounded border px-3 py-2 font-mono text-sm" value={editLessonForm.reading_content} onChange={(e) => setEditLessonForm((v) => ({ ...v, reading_content: e.target.value }))} />
+                  </>
                 )}
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={editLessonForm.is_preview} onChange={(e) => setEditLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
@@ -1463,7 +1749,7 @@ export default function AdminUiPage() {
           {editQuizForm.id && (
             <>
               <form onSubmit={saveQuizEdits} className="mt-3 grid gap-2 md:grid-cols-3">
-                <input type="number" min={0} max={100} className="rounded border px-3 py-2" value={editQuizForm.passing_score} onChange={(e) => setEditQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} />
+                <input type="number" min={0} max={100} className="rounded border px-3 py-2" value={editQuizForm.passing_score} onChange={(e) => setEditQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} placeholder="Passing score %" />
                 <input type="number" min={1} className="rounded border px-3 py-2" value={editQuizForm.time_limit_sec} onChange={(e) => setEditQuizForm((v) => ({ ...v, time_limit_sec: e.target.value }))} placeholder="Time limit sec" />
                 <div className="flex gap-2">
                   <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Quiz</button>

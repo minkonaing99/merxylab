@@ -1,3 +1,4 @@
+import { clearTokens, getRefreshToken, saveTokens } from "@/lib/auth";
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api";
 
@@ -28,6 +29,42 @@ async function parseResponse(res: Response): Promise<JsonValue | null> {
   }
 }
 
+async function refreshAccessToken(): Promise<string | null> {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const refresh = getRefreshToken();
+  if (!refresh) {
+    return null;
+  }
+
+  const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh }),
+    cache: "no-store",
+  });
+
+  const payload = await parseResponse(response);
+  if (
+    !response.ok ||
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload) ||
+    typeof payload.access !== "string"
+  ) {
+    clearTokens();
+    return null;
+  }
+
+  const tokenPayload = payload as Record<string, unknown>;
+  const nextAccess = tokenPayload.access as string;
+  const nextRefresh = typeof tokenPayload.refresh === "string" ? tokenPayload.refresh : refresh;
+  saveTokens(nextAccess, nextRefresh);
+  return nextAccess;
+}
+
 export async function apiFetch<T = JsonValue>(
   path: string,
   init: RequestInit = {},
@@ -41,13 +78,26 @@ export async function apiFetch<T = JsonValue>(
     headers.set("Authorization", `Bearer ${accessToken}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  let response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers,
     cache: "no-store",
   });
 
-  const payload = await parseResponse(response);
+  let payload = await parseResponse(response);
+  if (response.status === 401 && accessToken) {
+    const nextAccess = await refreshAccessToken();
+    if (nextAccess) {
+      headers.set("Authorization", `Bearer ${nextAccess}`);
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        ...init,
+        headers,
+        cache: "no-store",
+      });
+      payload = await parseResponse(response);
+    }
+  }
+
   if (!response.ok) {
     const detail =
       typeof payload === "object" &&

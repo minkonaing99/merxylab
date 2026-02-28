@@ -5,6 +5,7 @@ import { useParams, usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAccessToken } from "@/hooks/use-access-token";
+import { getAccessToken } from "@/lib/auth";
 
 type Lesson = {
   id: number;
@@ -12,6 +13,8 @@ type Lesson = {
   order: number;
   is_preview: boolean;
   locked: boolean;
+  has_quiz?: boolean;
+  quiz_status?: "PASSED" | "FAILED" | null;
 };
 
 type Section = {
@@ -34,6 +37,13 @@ type ExamEligibility = {
   final_exam_exists?: boolean;
   progress?: { completion_rate: number };
 };
+type CertificateResponse = {
+  issued: boolean;
+  certificate?: {
+    certificate_code: string;
+    issued_at: string;
+  };
+};
 
 export default function CourseDetailPage() {
   const router = useRouter();
@@ -43,36 +53,71 @@ export default function CourseDetailPage() {
   const accessToken = useAccessToken();
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [examEligibility, setExamEligibility] = useState<ExamEligibility | null>(null);
+  const [certificate, setCertificate] = useState<CertificateResponse | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const loadCourse = useCallback(async () => {
+  const loadCourse = useCallback(async (token: string) => {
     try {
       const data = await apiFetch<CourseDetail>(
         `/courses/${slug}/`,
         {},
-        accessToken,
+        token,
       );
       setCourse(data);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Failed to load course.";
       setError(message);
     }
-  }, [accessToken, slug]);
+  }, [slug]);
 
   useEffect(() => {
-    loadCourse();
-  }, [loadCourse]);
+    const token = accessToken || getAccessToken();
+    if (!token) {
+      router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+      return;
+    }
+    void loadCourse(token);
+  }, [accessToken, loadCourse, pathname, router]);
 
   useEffect(() => {
     if (!course?.enrolled || !accessToken) {
       setExamEligibility(null);
+      setCertificate(null);
       return;
     }
-    apiFetch<ExamEligibility>(`/courses/${course.id}/exam-eligibility/`, {}, accessToken)
-      .then(setExamEligibility)
+    Promise.all([
+      apiFetch<ExamEligibility>(`/courses/${course.id}/exam-eligibility/`, {}, accessToken),
+      apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, accessToken).catch(
+        () => ({ issued: false } as CertificateResponse),
+      ),
+    ])
+      .then(([eligibility, cert]) => {
+        setExamEligibility(eligibility);
+        setCertificate(cert);
+      })
       .catch(() => setExamEligibility(null));
   }, [course?.enrolled, course?.id, accessToken]);
+
+  const downloadCertificateFile = () => {
+    if (!course || !certificate?.issued) return;
+    const safeCourse = course.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const lines = [
+      "MerxyLab Course Certificate",
+      `Course: ${course.title}`,
+      `Certificate Code: ${certificate.certificate?.certificate_code || "N/A"}`,
+      `Issued At: ${certificate.certificate?.issued_at ? new Date(certificate.certificate.issued_at).toLocaleString() : "N/A"}`,
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = `certificate-${safeCourse || "course"}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(href);
+  };
 
   const enroll = async () => {
     if (!course) {
@@ -86,7 +131,7 @@ export default function CourseDetailPage() {
     setError("");
     try {
       await apiFetch(`/courses/${course.id}/enroll/`, { method: "POST", body: "{}" }, accessToken);
-      await loadCourse();
+      await loadCourse(accessToken);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Enrollment failed.";
       setError(message);
@@ -120,7 +165,13 @@ export default function CourseDetailPage() {
               Enrolled
             </p>
           )}
-          {course.enrolled && examEligibility?.can_take_final_exam && (
+          {course.enrolled && certificate?.issued ? (
+            <div className="mt-4">
+              <button type="button" className="btn btn-primary" onClick={downloadCertificateFile}>
+                Download Certificate
+              </button>
+            </div>
+          ) : course.enrolled && examEligibility?.can_take_final_exam && (
             <div className="mt-4">
               <Link href={`/final-exam/${course.id}`} className="btn btn-primary">
                 Take Final Exam
@@ -142,24 +193,29 @@ export default function CourseDetailPage() {
                 </h2>
                 <ul className="mt-3 space-y-2">
                   {section.lessons.map((lesson) => (
-                    <li key={lesson.id} className="surface-soft flex items-center justify-between px-3 py-2">
+                    <li key={lesson.id} className="surface-soft flex min-h-14 items-center justify-between px-3 py-2">
                       <div>
                         <p className="text-sm font-medium">
                           {lesson.order}. {lesson.title}
                         </p>
-                        <p className="text-xs muted">
-                          {lesson.is_preview ? "Preview" : lesson.locked ? "Locked" : "Unlocked"}
-                        </p>
+                        {!lesson.locked && lesson.quiz_status === "PASSED" && (
+                          <p className="mt-1 text-xs font-medium text-emerald-600">Passed</p>
+                        )}
+                        {!lesson.locked && lesson.quiz_status === "FAILED" && (
+                          <p className="mt-1 text-xs font-medium text-red-600">Failed</p>
+                        )}
                       </div>
                       {!lesson.locked ? (
                         <Link
                           href={`/lessons/${lesson.id}`}
-                          className="btn btn-primary px-3 py-1.5 text-xs"
+                          className="btn btn-primary min-w-20 px-3 py-1.5 text-xs"
                         >
                           Open
                         </Link>
                       ) : (
-                        <span className="text-xs muted">Enroll required</span>
+                        <span className="btn btn-secondary min-w-20 cursor-not-allowed px-3 py-1.5 text-xs opacity-70">
+                          Locked
+                        </span>
                       )}
                     </li>
                   ))}
