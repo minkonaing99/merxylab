@@ -206,6 +206,7 @@ class Certificate(TimeStampedModel):
     verification_code = models.CharField(max_length=32, unique=True, blank=True, default="")
     signed_payload = models.TextField(blank=True, default="")
     signature_version = models.PositiveSmallIntegerField(default=1)
+    certificate_pdf = models.FileField(upload_to="certificates/pdfs/", blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=255, blank=True, default="")
 

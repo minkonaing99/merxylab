@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
-import { downloadCertificateTemplate } from "@/lib/certificate";
+import { downloadCertificatePdf, downloadCertificateTemplate } from "@/lib/certificate";
 
 type ProfilePayload = {
   full_name: string;
@@ -419,16 +419,21 @@ export default function ProfilePage() {
                         <button
                           type="button"
                           className="btn btn-primary h-9 w-full px-3 sm:w-auto"
-                          onClick={() => {
-                            downloadCertificateTemplate({
-                              courseTitle: row.course_title,
-                              certificateCode: row.certificate_code,
-                              verificationCode: row.verification_code,
-                              verificationUrl: toPublicVerifyUrl(row.verification_code, row.verification_url),
-                              issuedAt: row.certificate_issued_at,
-                              studentName: form.full_name || "Student",
-                            });
-                            setNotice("Certificate downloaded.");
+                          onClick={async () => {
+                            try {
+                              await downloadCertificatePdf(row.course_id, accessToken);
+                              setNotice("Certificate PDF downloaded.");
+                            } catch {
+                              downloadCertificateTemplate({
+                                courseTitle: row.course_title,
+                                certificateCode: row.certificate_code,
+                                verificationCode: row.verification_code,
+                                verificationUrl: toPublicVerifyUrl(row.verification_code, row.verification_url),
+                                issuedAt: row.certificate_issued_at,
+                                studentName: form.full_name || "Student",
+                              });
+                              setNotice("Certificate HTML downloaded.");
+                            }
                           }}
                         >
                           Download Certificate

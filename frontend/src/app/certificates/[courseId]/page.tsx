@@ -6,7 +6,7 @@ import { useParams, usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
-import { downloadCertificateTemplate } from "@/lib/certificate";
+import { downloadCertificatePdf, downloadCertificateTemplate } from "@/lib/certificate";
 
 type CertificateResponse = {
   issued: boolean;
@@ -193,16 +193,22 @@ export default function StudentCertificatePage() {
                 <button
                   type="button"
                   className="btn btn-primary w-full sm:w-auto"
-                  onClick={() =>
-                    downloadCertificateTemplate({
-                      courseTitle,
-                      certificateCode: certificate.certificate_code,
-                      verificationCode: certificate.verification_code,
-                      verificationUrl: publicVerifyUrl,
-                      issuedAt: certificate.issued_at,
-                      studentName,
-                    })
-                  }
+                  onClick={async () => {
+                    try {
+                      await downloadCertificatePdf(courseId, accessToken);
+                      setNotice("Certificate PDF downloaded.");
+                    } catch {
+                      downloadCertificateTemplate({
+                        courseTitle,
+                        certificateCode: certificate.certificate_code,
+                        verificationCode: certificate.verification_code,
+                        verificationUrl: publicVerifyUrl,
+                        issuedAt: certificate.issued_at,
+                        studentName,
+                      });
+                      setNotice("Certificate HTML downloaded.");
+                    }
+                  }}
                 >
                   Download Certificate
                 </button>

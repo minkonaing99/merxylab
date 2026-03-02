@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAccessToken } from "@/hooks/use-access-token";
 import { getAccessToken } from "@/lib/auth";
-import { downloadCertificateTemplate } from "@/lib/certificate";
+import { downloadCertificatePdf, downloadCertificateTemplate } from "@/lib/certificate";
 
 type Lesson = {
   id: number;
@@ -136,19 +136,23 @@ export default function CourseDetailPage() {
     void loadEligibilityAndCertificate();
   }, [course?.enrolled, course?.id, accessToken]);
 
-  const downloadCertificateFile = () => {
+  const downloadCertificateFile = async () => {
     if (!course || !certificate?.issued) return;
-    downloadCertificateTemplate({
-      courseTitle: course.title,
-      certificateCode: certificate.certificate?.certificate_code,
-      verificationCode: certificate.certificate?.verification_code,
-      verificationUrl: toPublicVerifyUrl(
-        certificate.certificate?.verification_code,
-        certificate.certificate?.verification_url,
-      ),
-      issuedAt: certificate.certificate?.issued_at,
-      studentName: studentName || "Student",
-    });
+    try {
+      await downloadCertificatePdf(course.id, accessToken);
+    } catch {
+      downloadCertificateTemplate({
+        courseTitle: course.title,
+        certificateCode: certificate.certificate?.certificate_code,
+        verificationCode: certificate.certificate?.verification_code,
+        verificationUrl: toPublicVerifyUrl(
+          certificate.certificate?.verification_code,
+          certificate.certificate?.verification_url,
+        ),
+        issuedAt: certificate.certificate?.issued_at,
+        studentName: studentName || "Student",
+      });
+    }
   };
 
   const enroll = async () => {

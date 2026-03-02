@@ -2,6 +2,7 @@ import mimetypes
 import random
 import shutil
 import uuid
+import base64
 from datetime import timedelta
 from pathlib import Path
 
@@ -9,12 +10,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core import signing
+from django.core.files.base import ContentFile
 from django.core.exceptions import SuspiciousFileOperation
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -560,6 +563,157 @@ def _create_certificate_verification_log(
 
 def _new_certificate_code():
     return uuid.uuid4().hex[:16].upper()
+
+
+def _student_display_name(user):
+    profile = StudentProfile.objects.filter(user=user).first()
+    if profile and profile.full_name:
+        return profile.full_name.strip()
+    return user.get_full_name().strip() or user.username
+
+
+def _certificate_logo_data_uri():
+    logo_path = (Path(settings.BASE_DIR).parent / "frontend" / "public" / "merxylab-logo-dark.png").resolve()
+    if not logo_path.exists():
+        return ""
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _certificate_pdf_html(*, student_name, course_title, certificate_code, verification_code, verification_url, issued_at):
+    logo_data = _certificate_logo_data_uri()
+    issued_text = timezone.localtime(issued_at).strftime("%m/%d/%Y, %I:%M %p") if issued_at else "N/A"
+    qr_image_url = (
+        f"https://quickchart.io/qr?size=140&text={verification_url}"
+        if verification_url else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root {{
+      --ink:#0f172a; --muted:#475569; --accent:#0f766e; --accent2:#134e4a; --line:#cbd5e1; --paper:#fff;
+    }}
+    html,body {{ margin:0; padding:0; background:#e2e8f0; font-family:Segoe UI,Tahoma,sans-serif; color:var(--ink); }}
+    .page {{ width:1123px; height:794px; margin:0 auto; background:var(--paper); position:relative; overflow:hidden; }}
+    .frame {{ position:absolute; inset:26px; border:2px solid var(--line); }}
+    .inner {{ position:absolute; inset:40px; border:1px solid #d8e1ee; background:#fff; display:flex; flex-direction:column; }}
+    .header {{ height:156px; background:linear-gradient(120deg,var(--accent2),var(--accent)); display:flex; align-items:center; justify-content:space-between; padding:0 44px; }}
+    .header img {{ width:200px; height:200px; object-fit:contain; }}
+    .header-copy {{ color:#ecfeff; text-align:right; }}
+    .header-copy p {{ margin:0; letter-spacing:.16em; text-transform:uppercase; font-size:11px; }}
+    .header-copy h2 {{ margin:8px 0 0; font-size:30px; }}
+    .content {{ flex:1; padding:26px 50px 28px; text-align:center; display:flex; flex-direction:column; justify-content:space-between; }}
+    .eyebrow {{ margin:0; color:var(--muted); letter-spacing:.22em; text-transform:uppercase; font-size:11px; }}
+    .title {{ margin:10px 0 0; font-size:46px; font-family:Georgia,serif; }}
+    .name {{ margin:18px 0 0; font-size:44px; color:var(--accent); font-weight:700; }}
+    .desc {{ margin:12px 0 0; font-size:18px; color:var(--muted); }}
+    .course {{ margin:10px 0 0; font-size:35px; font-weight:700; color:#0a2540; }}
+    .meta {{ margin:18px auto 0; width:100%; max-width:900px; display:grid; grid-template-columns:1fr 1fr; gap:14px; text-align:left; }}
+    .meta-card {{ border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:#f8fafc; }}
+    .meta-key {{ font-size:10px; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); }}
+    .meta-val {{ margin-top:6px; font-size:15px; font-weight:600; }}
+    .trust {{ margin:14px auto 0; width:100%; max-width:900px; display:grid; grid-template-columns:1fr auto; gap:16px; align-items:center; text-align:left; }}
+    .trust-left {{ border:1px dashed #c6d2e2; border-radius:12px; background:#f8fbff; padding:10px 12px; font-size:11px; color:var(--muted); }}
+    .qr-wrap {{ width:126px; text-align:center; font-size:11px; color:var(--muted); }}
+    .qr-wrap img {{ width:112px; height:112px; border:1px solid var(--line); border-radius:10px; background:#fff; padding:4px; }}
+  </style>
+</head>
+<body>
+  <article class="page">
+    <div class="frame"></div>
+    <div class="inner">
+      <header class="header">
+        <div>{f'<img src="{logo_data}" alt="MerxyLab logo" />' if logo_data else ''}</div>
+        <div class="header-copy">
+          <p>Official Learning Credential</p>
+          <h2>Certificate of Achievement</h2>
+        </div>
+      </header>
+      <section class="content">
+        <div>
+          <p class="eyebrow">Certificate of Completion</p>
+          <h1 class="title">Awarded To</h1>
+          <p class="name">{student_name}</p>
+          <p class="desc">for successfully completing the course</p>
+          <p class="course">{course_title}</p>
+          <div class="meta">
+            <div class="meta-card"><div class="meta-key">Certificate Code</div><div class="meta-val">{certificate_code}</div></div>
+            <div class="meta-card"><div class="meta-key">Issued At</div><div class="meta-val">{issued_text}</div></div>
+          </div>
+          <div class="trust">
+            <div class="trust-left">
+              <div><strong>Verification Code:</strong> {verification_code}</div>
+              <div><strong>Verification URL:</strong> {verification_url or 'N/A'}</div>
+            </div>
+            <div class="qr-wrap">
+              {f'<img src="{qr_image_url}" alt="Certificate verification QR" />' if qr_image_url else ''}
+              <div>Scan to verify</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </article>
+</body>
+</html>"""
+
+
+def _render_certificate_pdf_bytes(html):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        return None, f"Playwright unavailable: {exc}"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1123, "height": 794})
+            page.set_content(html, wait_until="networkidle")
+            pdf_bytes = page.pdf(
+                width="1123px",
+                height="794px",
+                print_background=True,
+                margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+            )
+            browser.close()
+            return pdf_bytes, ""
+    except Exception as exc:
+        return None, f"Failed to generate certificate PDF: {exc}"
+
+
+def _ensure_certificate_pdf(certificate, request=None):
+    if certificate.certificate_pdf:
+        try:
+            if certificate.certificate_pdf.storage.exists(certificate.certificate_pdf.name):
+                return True, ""
+        except Exception:
+            pass
+
+    ensure_certificate_signature(certificate)
+    verification_url = (
+        request.build_absolute_uri(f"/verify/{certificate.verification_code}")
+        if request
+        else f"http://localhost:3000/verify/{certificate.verification_code}"
+    )
+    student_name = _student_display_name(certificate.user)
+    html = _certificate_pdf_html(
+        student_name=student_name,
+        course_title=certificate.course.title,
+        certificate_code=certificate.certificate_code,
+        verification_code=certificate.verification_code,
+        verification_url=verification_url,
+        issued_at=certificate.issued_at,
+    )
+    pdf_bytes, error = _render_certificate_pdf_bytes(html)
+    if not pdf_bytes:
+        return False, error or "Failed to generate certificate PDF."
+
+    safe_course = slugify(certificate.course.title) or f"course-{certificate.course_id}"
+    filename = f"certificates/pdfs/{safe_course}-{certificate.certificate_code}.pdf"
+    certificate.certificate_pdf.save(filename, ContentFile(pdf_bytes), save=True)
+    return True, ""
 
 
 def _active_session_for_token(payload, lesson_id):
@@ -1282,6 +1436,10 @@ def submit_course_final_exam(request, course_id):
                     meta={"course_id": course.id, "exam_attempt_id": attempt.id},
                 )
 
+    # Generate and store PDF once certificate is issued (best-effort, non-blocking for exam result).
+    if passed and certificate is not None:
+        _ensure_certificate_pdf(certificate, request=request)
+
     payload = FinalExamAttemptSerializer(attempt).data
     payload["summary"] = {
         "total_questions": len(questions),
@@ -1335,6 +1493,35 @@ def my_course_certificate(request, course_id):
             "certificate": CertificateSerializer(certificate, context={"request": request}).data,
         }
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_course_certificate_pdf(request, course_id):
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+    if not _is_profile_verified(request.user):
+        return Response(
+            {"detail": "Profile verification is required before certificate access."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
+    if certificate is None:
+        return Response({"detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
+
+    ok, error = _ensure_certificate_pdf(certificate, request=request)
+    if not ok:
+        return Response(
+            {"detail": error or "PDF generator unavailable. Install playwright and run 'playwright install chromium'."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    safe_title = "".join(ch.lower() if ch.isalnum() else "-" for ch in course.title).strip("-") or "course"
+    response = FileResponse(certificate.certificate_pdf.open("rb"), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="certificate-{safe_title}.pdf"'
+    return response
 
 
 @api_view(["GET"])
@@ -1997,9 +2184,12 @@ def admin_certificate_reissue(request, certificate_id):
         old_certificate_code = certificate.certificate_code
         old_verification_code = certificate.verification_code
 
+        if certificate.certificate_pdf:
+            certificate.certificate_pdf.delete(save=False)
         certificate.certificate_code = _new_certificate_code()
         certificate.verification_code = ""
         certificate.signed_payload = ""
+        certificate.certificate_pdf = ""
         certificate.revoked_at = None
         certificate.revoked_reason = ""
         certificate.save(
@@ -2007,6 +2197,7 @@ def admin_certificate_reissue(request, certificate_id):
                 "certificate_code",
                 "verification_code",
                 "signed_payload",
+                "certificate_pdf",
                 "revoked_at",
                 "revoked_reason",
                 "updated_at",
@@ -2027,6 +2218,8 @@ def admin_certificate_reissue(request, certificate_id):
                 "new_verification_code": certificate.verification_code,
             },
         )
+
+    _ensure_certificate_pdf(certificate, request=request)
 
     return Response(
         {
@@ -2138,6 +2331,9 @@ def admin_student_expel(request, user_id):
     profile = StudentProfile.objects.filter(user=student).first()
     if profile and profile.passport_photo:
         profile.passport_photo.delete(save=False)
+    for cert in Certificate.objects.filter(user=student).only("id", "certificate_pdf"):
+        if cert.certificate_pdf:
+            cert.certificate_pdf.delete(save=False)
 
     username = student.username
     student.delete()

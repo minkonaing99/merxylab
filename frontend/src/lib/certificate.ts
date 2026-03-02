@@ -1,3 +1,5 @@
+import { API_BASE_URL } from "@/lib/api";
+
 type CertificateTemplateInput = {
   courseTitle: string;
   certificateCode?: string;
@@ -377,6 +379,38 @@ export function downloadCertificateTemplate(input: CertificateTemplateInput) {
   const anchor = document.createElement("a");
   anchor.href = href;
   anchor.download = `certificate-${safeCourse || "course"}.html`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(href);
+}
+
+export async function downloadCertificatePdf(courseId: number, accessToken?: string | null) {
+  const token = accessToken || (typeof window !== "undefined" ? localStorage.getItem("access_token") : null);
+  const res = await fetch(`${API_BASE_URL}/courses/${courseId}/certificate/pdf/`, {
+    method: "GET",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    let message = `PDF download failed (${res.status})`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail && typeof payload.detail === "string") {
+        message = payload.detail;
+      }
+    } catch {
+      // ignore json parse failure
+    }
+    throw new Error(message);
+  }
+
+  const blob = await res.blob();
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = `certificate-${courseId}.pdf`;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);

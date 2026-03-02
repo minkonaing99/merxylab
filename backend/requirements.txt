@@ -8,3 +8,4 @@ cryptography==46.0.5
 pymongo==4.12.0
 celery==5.4.0
 redis==5.1.1
+playwright==1.55.0
