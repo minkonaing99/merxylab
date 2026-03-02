@@ -1,6 +1,9 @@
 type CertificateTemplateInput = {
   courseTitle: string;
   certificateCode?: string;
+  verificationCode?: string;
+  verificationUrl?: string;
+  signedPayload?: string;
   issuedAt?: string;
   studentName?: string;
 };
@@ -17,9 +20,15 @@ function escapeHtml(value: string): string {
 export function downloadCertificateTemplate(input: CertificateTemplateInput) {
   const courseTitle = input.courseTitle || "Course";
   const certificateCode = input.certificateCode || "N/A";
+  const verificationCode = input.verificationCode || "N/A";
+  const verificationUrl = input.verificationUrl || "";
+  const signedPayload = input.signedPayload || "N/A";
   const issuedAt = input.issuedAt ? new Date(input.issuedAt).toLocaleString() : "N/A";
   const studentName = (input.studentName || "").trim() || "Student";
   const safeCourse = courseTitle.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const qrImageUrl = verificationUrl
+    ? `https://quickchart.io/qr?size=140&text=${encodeURIComponent(verificationUrl)}`
+    : "";
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -51,6 +60,12 @@ export function downloadCertificateTemplate(input: CertificateTemplateInput) {
     .sign { margin-top:36px; display:flex; justify-content:space-between; gap:20px; }
     .sign-item { flex:1; text-align:center; color:var(--muted); font-size:13px; }
     .sign-line { width:240px; height:1px; background:var(--line); margin:0 auto 8px; }
+    .trust { margin-top:20px; display:flex; gap:24px; align-items:flex-start; }
+    .trust-left { flex:1; text-align:left; }
+    .qr-wrap { width:150px; text-align:center; font-size:11px; color:var(--muted); }
+    .qr-wrap img { width:140px; height:140px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+    .meta-stack { margin-top:8px; font-size:11px; color:var(--muted); }
+    .payload { margin-top:6px; font-family:Consolas, "Courier New", monospace; font-size:10px; line-height:1.4; white-space:pre-wrap; word-break:break-all; max-height:90px; overflow:auto; border:1px dashed var(--line); border-radius:8px; padding:8px; background:#f8fafc; }
     @media print {
       body { background:#fff; }
       .page { margin:0; width:100vw; height:100vh; box-shadow:none; border:none; }
@@ -78,6 +93,18 @@ export function downloadCertificateTemplate(input: CertificateTemplateInput) {
         <div class="meta-card">
           <div class="meta-key">Issued At</div>
           <div class="meta-val">${escapeHtml(issuedAt)}</div>
+        </div>
+      </div>
+      <div class="trust">
+        <div class="trust-left">
+          <div class="meta-stack"><strong>Verification Code:</strong> ${escapeHtml(verificationCode)}</div>
+          <div class="meta-stack"><strong>Verification URL:</strong> ${verificationUrl ? `<a href="${escapeHtml(verificationUrl)}">${escapeHtml(verificationUrl)}</a>` : "N/A"}</div>
+          <div class="meta-stack"><strong>Signed Payload</strong></div>
+          <div class="payload">${escapeHtml(signedPayload)}</div>
+        </div>
+        <div class="qr-wrap">
+          ${qrImageUrl ? `<img src="${escapeHtml(qrImageUrl)}" alt="Certificate verification QR" />` : ""}
+          <div>Scan to verify</div>
         </div>
       </div>
       <div class="sign">

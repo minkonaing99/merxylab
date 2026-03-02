@@ -322,6 +322,95 @@ class CoreApiFlowTests(APITransactionTestCase):
         self.assertTrue(cert.data["issued"])
         self.assertEqual(Certificate.objects.filter(user=self.student, course=self.course).count(), 1)
 
+        verify_code = cert.data["certificate"]["verification_code"]
+        public_verify = self.client.get(f"/api/verify/{verify_code}/")
+        self.assertEqual(public_verify.status_code, 200)
+        self.assertTrue(public_verify.data["valid"])
+        self.assertEqual(public_verify.data["status"], "valid")
+        self.assertEqual(
+            public_verify.data["certificate"]["certificate_code"],
+            cert.data["certificate"]["certificate_code"],
+        )
+
+    def test_admin_certificate_revoke_reissue_and_audit(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        submit = self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+        self.assertEqual(submit.status_code, 201)
+        cert = self.client.get(f"/api/courses/{self.course.id}/certificate/")
+        self.assertEqual(cert.status_code, 200)
+        cert_id = cert.data["certificate"]["id"]
+        old_verify_code = cert.data["certificate"]["verification_code"]
+        old_certificate_code = cert.data["certificate"]["certificate_code"]
+
+        self.client.credentials()
+        self.auth_as_admin()
+
+        student_certs = self.client.get(f"/api/admin/students/{self.student.id}/certificates/")
+        self.assertEqual(student_certs.status_code, 200)
+        self.assertEqual(len(student_certs.data["certificates"]), 1)
+        self.assertEqual(student_certs.data["certificates"][0]["certificate"]["id"], cert_id)
+
+        revoked = self.client.post(
+            f"/api/admin/certificates/{cert_id}/revoke/",
+            {"reason": "Academic integrity review."},
+            format="json",
+        )
+        self.assertEqual(revoked.status_code, 200)
+        self.assertTrue(bool(revoked.data["certificate"]["revoked_at"]))
+
+        public_revoked = self.client.get(f"/api/verify/{old_verify_code}/")
+        self.assertEqual(public_revoked.status_code, 200)
+        self.assertFalse(public_revoked.data["valid"])
+        self.assertEqual(public_revoked.data["status"], "revoked")
+
+        reissued = self.client.post(
+            f"/api/admin/certificates/{cert_id}/reissue/",
+            {"reason": "Reissued after review closure."},
+            format="json",
+        )
+        self.assertEqual(reissued.status_code, 200)
+        new_verify_code = reissued.data["certificate"]["verification_code"]
+        new_certificate_code = reissued.data["certificate"]["certificate_code"]
+        self.assertNotEqual(new_verify_code, old_verify_code)
+        self.assertNotEqual(new_certificate_code, old_certificate_code)
+
+        old_verify_lookup = self.client.get(f"/api/verify/{old_verify_code}/")
+        self.assertEqual(old_verify_lookup.status_code, 404)
+        new_verify_lookup = self.client.get(f"/api/verify/{new_verify_code}/")
+        self.assertEqual(new_verify_lookup.status_code, 200)
+        self.assertTrue(new_verify_lookup.data["valid"])
+        self.assertEqual(new_verify_lookup.data["status"], "valid")
+
+        audit_feed = self.client.get("/api/admin/certificates/audit/")
+        self.assertEqual(audit_feed.status_code, 200)
+        actions = [item["action"] for item in audit_feed.data if item["id"]]
+        self.assertIn("ISSUED", actions)
+        self.assertIn("REVOKED", actions)
+        self.assertIn("REISSUED", actions)
+
     def test_final_exam_submit_with_blank_answers_counts_as_fail(self):
         self.auth_as_student()
         self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")

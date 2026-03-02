@@ -203,15 +203,53 @@ class Certificate(TimeStampedModel):
     exam_attempt = models.ForeignKey(FinalExamAttempt, on_delete=models.SET_NULL, null=True, blank=True, related_name="certificates")
     issued_at = models.DateTimeField(auto_now_add=True)
     certificate_code = models.CharField(max_length=32, unique=True)
+    verification_code = models.CharField(max_length=32, unique=True, blank=True, default="")
+    signed_payload = models.TextField(blank=True, default="")
+    signature_version = models.PositiveSmallIntegerField(default=1)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
         ordering = ["-issued_at"]
         constraints = [
             models.UniqueConstraint(fields=["user", "course"], name="uniq_certificate_user_course"),
         ]
+        indexes = [
+            models.Index(fields=["verification_code"]),
+        ]
 
     def __str__(self):
         return f"cert:{self.user_id}:{self.course_id}:{self.certificate_code}"
+
+
+class CertificateAuditLog(TimeStampedModel):
+    class Action(models.TextChoices):
+        ISSUED = "ISSUED", "Issued"
+        REISSUED = "REISSUED", "Reissued"
+        REVOKED = "REVOKED", "Revoked"
+        UNREVOKED = "UNREVOKED", "Unrevoked"
+
+    certificate = models.ForeignKey(Certificate, on_delete=models.CASCADE, related_name="audit_logs")
+    action = models.CharField(max_length=16, choices=Action.choices)
+    reason = models.CharField(max_length=255, blank=True, default="")
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="certificate_audit_logs",
+    )
+    meta = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["action", "created_at"]),
+            models.Index(fields=["certificate", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"cert-audit:{self.certificate_id}:{self.action}"
 
 
 class CreditWallet(TimeStampedModel):

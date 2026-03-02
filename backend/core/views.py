@@ -23,6 +23,7 @@ from rest_framework.response import Response
 from core.models import (
     ActiveStreamSession,
     Certificate,
+    CertificateAuditLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -41,11 +42,13 @@ from core.models import (
 )
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from core.permissions import IsAdminRole
+from core.certificates import ensure_certificate_signature, validate_certificate_signature
 from core.mongo_store import delete_quiz_payload, get_quiz_map, get_quiz_payload, set_quiz_payload
 from core.serializers import (
     AdminCreditAdjustSerializer,
     AdminCourseCreateSerializer,
     AdminCourseUpdateSerializer,
+    AdminCertificateActionSerializer,
     AdminFinalExamUpsertSerializer,
     AdminLessonCreateSerializer,
     AdminLessonUpdateSerializer,
@@ -56,6 +59,7 @@ from core.serializers import (
     AdminUploadHlsMetadataSerializer,
     AdminUploadVideoSerializer,
     CertificateSerializer,
+    CertificateAuditLogSerializer,
     CreditTransactionSerializer,
     CreditWalletSerializer,
     CourseDetailSerializer,
@@ -515,6 +519,20 @@ def _video_job_payload(job):
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+def _create_certificate_audit_log(*, certificate, action, actor=None, reason="", meta=None):
+    return CertificateAuditLog.objects.create(
+        certificate=certificate,
+        action=action,
+        actor=actor,
+        reason=(reason or "").strip(),
+        meta=meta or {},
+    )
+
+
+def _new_certificate_code():
+    return uuid.uuid4().hex[:16].upper()
 
 
 def _active_session_for_token(payload, lesson_id):
@@ -1220,12 +1238,21 @@ def submit_course_final_exam(request, course_id):
                 course=course,
                 defaults={
                     "exam_attempt": attempt,
-                    "certificate_code": uuid.uuid4().hex[:16].upper(),
+                    "certificate_code": _new_certificate_code(),
                 },
             )
             if not certificate_created and certificate.exam_attempt_id is None:
                 certificate.exam_attempt = attempt
                 certificate.save(update_fields=["exam_attempt", "updated_at"])
+            ensure_certificate_signature(certificate)
+            if certificate_created:
+                _create_certificate_audit_log(
+                    certificate=certificate,
+                    action=CertificateAuditLog.Action.ISSUED,
+                    actor=request.user,
+                    reason="Final exam passed.",
+                    meta={"course_id": course.id, "exam_attempt_id": attempt.id},
+                )
 
     payload = FinalExamAttemptSerializer(attempt).data
     payload["summary"] = {
@@ -1235,7 +1262,9 @@ def submit_course_final_exam(request, course_id):
     }
     payload["certificate_issued"] = bool(passed)
     payload["certificate_created"] = bool(certificate_created) if passed else False
-    payload["certificate"] = CertificateSerializer(certificate).data if passed and certificate else None
+    payload["certificate"] = (
+        CertificateSerializer(certificate, context={"request": request}).data if passed and certificate else None
+    )
     payload["charged_credits"] = charged_credits
     return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -1264,7 +1293,68 @@ def my_course_certificate(request, course_id):
     certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
     if certificate is None:
         return Response({"issued": False, "detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
-    return Response({"issued": True, "certificate": CertificateSerializer(certificate).data})
+    ensure_certificate_signature(certificate)
+    return Response(
+        {
+            "issued": True,
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def public_verify_certificate(request, verification_code):
+    code = str(verification_code or "").strip().upper()
+    certificate = (
+        Certificate.objects.select_related("user", "course", "user__student_profile")
+        .filter(verification_code=code)
+        .first()
+    )
+    if certificate is None:
+        return Response(
+            {"valid": False, "status": "not_found", "detail": "Certificate not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    ensure_certificate_signature(certificate)
+    signature_valid, signature_state = validate_certificate_signature(certificate)
+
+    status_label = "valid"
+    detail = "Certificate is valid."
+    if certificate.revoked_at:
+        status_label = "revoked"
+        detail = "Certificate has been revoked."
+    elif not signature_valid:
+        status_label = "invalid_signature"
+        detail = "Certificate signature check failed."
+
+    student_name = ""
+    profile = getattr(certificate.user, "student_profile", None)
+    if profile and profile.full_name:
+        student_name = profile.full_name.strip()
+    if not student_name:
+        student_name = certificate.user.get_full_name().strip() or certificate.user.username
+
+    return Response(
+        {
+            "valid": bool(status_label == "valid"),
+            "status": status_label,
+            "detail": detail,
+            "certificate": {
+                "certificate_code": certificate.certificate_code,
+                "verification_code": certificate.verification_code,
+                "student_name": student_name,
+                "course_title": certificate.course.title,
+                "issued_at": certificate.issued_at,
+                "revoked_at": certificate.revoked_at,
+                "revoked_reason": certificate.revoked_reason,
+                "signature_version": certificate.signature_version,
+                "signed_payload": certificate.signed_payload,
+                "signature_state": signature_state,
+            },
+        }
+    )
 
 
 @api_view(["GET"])
@@ -1739,6 +1829,132 @@ def admin_student_profile_review(request, user_id):
             "profile": profile_payload,
         }
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_certificates(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+    certificates = (
+        Certificate.objects.filter(user=student)
+        .select_related("course", "exam_attempt")
+        .prefetch_related("audit_logs__actor")
+        .order_by("-issued_at", "-id")
+    )
+    payload = []
+    for cert in certificates:
+        ensure_certificate_signature(cert)
+        payload.append(
+            {
+                "certificate": CertificateSerializer(cert, context={"request": request}).data,
+                "course": {"id": cert.course_id, "title": cert.course.title},
+                "audit_logs": CertificateAuditLogSerializer(cert.audit_logs.all()[:20], many=True).data,
+            }
+        )
+    return Response(
+        {
+            "student": {"id": student.id, "username": student.username, "email": student.email or ""},
+            "certificates": payload,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_revoke(request, certificate_id):
+    certificate = get_object_or_404(Certificate.objects.select_related("course", "user"), id=certificate_id)
+    serializer = AdminCertificateActionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    reason = serializer.validated_data.get("reason", "").strip()
+    with transaction.atomic():
+        certificate = Certificate.objects.select_for_update().get(id=certificate.id)
+        if certificate.revoked_at is None:
+            certificate.revoked_at = timezone.now()
+            certificate.revoked_reason = reason or "Revoked by admin."
+            certificate.save(update_fields=["revoked_at", "revoked_reason", "updated_at"])
+            _create_certificate_audit_log(
+                certificate=certificate,
+                action=CertificateAuditLog.Action.REVOKED,
+                actor=request.user,
+                reason=certificate.revoked_reason,
+                meta={"course_id": certificate.course_id, "user_id": certificate.user_id},
+            )
+    ensure_certificate_signature(certificate)
+    return Response(
+        {
+            "detail": "Certificate revoked.",
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_reissue(request, certificate_id):
+    certificate = get_object_or_404(Certificate.objects.select_related("course", "user"), id=certificate_id)
+    serializer = AdminCertificateActionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    reason = serializer.validated_data.get("reason", "").strip()
+
+    with transaction.atomic():
+        certificate = Certificate.objects.select_for_update().get(id=certificate.id)
+        old_certificate_code = certificate.certificate_code
+        old_verification_code = certificate.verification_code
+
+        certificate.certificate_code = _new_certificate_code()
+        certificate.verification_code = ""
+        certificate.signed_payload = ""
+        certificate.revoked_at = None
+        certificate.revoked_reason = ""
+        certificate.save(
+            update_fields=[
+                "certificate_code",
+                "verification_code",
+                "signed_payload",
+                "revoked_at",
+                "revoked_reason",
+                "updated_at",
+            ]
+        )
+        ensure_certificate_signature(certificate)
+        _create_certificate_audit_log(
+            certificate=certificate,
+            action=CertificateAuditLog.Action.REISSUED,
+            actor=request.user,
+            reason=reason or "Reissued by admin.",
+            meta={
+                "course_id": certificate.course_id,
+                "user_id": certificate.user_id,
+                "old_certificate_code": old_certificate_code,
+                "new_certificate_code": certificate.certificate_code,
+                "old_verification_code": old_verification_code,
+                "new_verification_code": certificate.verification_code,
+            },
+        )
+
+    return Response(
+        {
+            "detail": "Certificate reissued with new verification identity.",
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_audit_logs(request):
+    logs = CertificateAuditLog.objects.select_related("certificate", "certificate__course", "certificate__user", "actor")
+    user_id = request.query_params.get("user_id")
+    course_id = request.query_params.get("course_id")
+    if user_id:
+        logs = logs.filter(certificate__user_id=user_id)
+    if course_id:
+        logs = logs.filter(certificate__course_id=course_id)
+    logs = logs.order_by("-created_at", "-id")[:200]
+    return Response(CertificateAuditLogSerializer(logs, many=True).data)
 
 
 @api_view(["GET"])

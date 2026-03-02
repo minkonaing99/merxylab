@@ -42,6 +42,9 @@ type CertificateResponse = {
   issued: boolean;
   certificate?: {
     certificate_code: string;
+    verification_code?: string;
+    verification_url?: string;
+    signed_payload?: string;
     issued_at: string;
   };
 };
@@ -113,6 +116,9 @@ export default function CourseDetailPage() {
     downloadCertificateTemplate({
       courseTitle: course.title,
       certificateCode: certificate.certificate?.certificate_code,
+      verificationCode: certificate.certificate?.verification_code,
+      verificationUrl: certificate.certificate?.verification_url,
+      signedPayload: certificate.certificate?.signed_payload,
       issuedAt: certificate.certificate?.issued_at,
       studentName: studentName || "Student",
     });

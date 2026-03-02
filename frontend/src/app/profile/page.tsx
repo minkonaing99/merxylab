@@ -41,6 +41,9 @@ type CertificateResponse = {
   issued: boolean;
   certificate?: {
     certificate_code: string;
+    verification_code?: string;
+    verification_url?: string;
+    signed_payload?: string;
     issued_at: string;
   };
 };
@@ -48,6 +51,9 @@ type EligibilityRow = Eligibility & {
   course_title: string;
   certificate_issued: boolean;
   certificate_code?: string;
+  verification_code?: string;
+  verification_url?: string;
+  signed_payload?: string;
   certificate_issued_at?: string;
 };
 
@@ -168,6 +174,9 @@ export default function ProfilePage() {
                 course_title: course.title,
                 certificate_issued: Boolean(cert.issued),
                 certificate_code: cert.certificate?.certificate_code,
+                verification_code: cert.certificate?.verification_code,
+                verification_url: cert.certificate?.verification_url,
+                signed_payload: cert.certificate?.signed_payload,
                 certificate_issued_at: cert.certificate?.issued_at,
               };
             } catch {
@@ -376,6 +385,9 @@ export default function ProfilePage() {
                           downloadCertificateTemplate({
                             courseTitle: row.course_title,
                             certificateCode: row.certificate_code,
+                            verificationCode: row.verification_code,
+                            verificationUrl: row.verification_url,
+                            signedPayload: row.signed_payload,
                             issuedAt: row.certificate_issued_at,
                             studentName: form.full_name || "Student",
                           });

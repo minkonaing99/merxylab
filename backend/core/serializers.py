@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from core.models import (
     Certificate,
+    CertificateAuditLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -508,10 +509,30 @@ class FinalExamAttemptSerializer(serializers.ModelSerializer):
 class CertificateSerializer(serializers.ModelSerializer):
     course_id = serializers.IntegerField(source="course.id", read_only=True)
     exam_attempt_id = serializers.IntegerField(source="exam_attempt.id", read_only=True)
+    verification_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Certificate
-        fields = ["id", "course_id", "exam_attempt_id", "issued_at", "certificate_code"]
+        fields = [
+            "id",
+            "course_id",
+            "exam_attempt_id",
+            "issued_at",
+            "certificate_code",
+            "verification_code",
+            "verification_url",
+            "signed_payload",
+            "signature_version",
+            "revoked_at",
+            "revoked_reason",
+        ]
+
+    def get_verification_url(self, obj):
+        request = self.context.get("request")
+        path = f"/api/verify/{obj.verification_code}/"
+        if request:
+            return request.build_absolute_uri(path)
+        return path
 
 
 class CreditTransactionSerializer(serializers.ModelSerializer):
@@ -559,3 +580,15 @@ class AdminStudentListRowSerializer(serializers.Serializer):
     credits = serializers.IntegerField()
     enrollments = serializers.IntegerField()
     owned_courses = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class CertificateAuditLogSerializer(serializers.ModelSerializer):
+    actor_username = serializers.CharField(source="actor.username", read_only=True)
+
+    class Meta:
+        model = CertificateAuditLog
+        fields = ["id", "action", "reason", "actor", "actor_username", "meta", "created_at"]
+
+
+class AdminCertificateActionSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
