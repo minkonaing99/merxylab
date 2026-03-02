@@ -252,6 +252,32 @@ class CertificateAuditLog(TimeStampedModel):
         return f"cert-audit:{self.certificate_id}:{self.action}"
 
 
+class CertificateVerificationLog(TimeStampedModel):
+    class Status(models.TextChoices):
+        VALID = "VALID", "Valid"
+        REVOKED = "REVOKED", "Revoked"
+        INVALID_SIGNATURE = "INVALID_SIGNATURE", "Invalid Signature"
+        NOT_FOUND = "NOT_FOUND", "Not Found"
+        RATE_LIMITED = "RATE_LIMITED", "Rate Limited"
+
+    certificate = models.ForeignKey(Certificate, on_delete=models.SET_NULL, null=True, blank=True, related_name="verification_logs")
+    verification_code = models.CharField(max_length=32, blank=True, default="")
+    status = models.CharField(max_length=32, choices=Status.choices)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    user_agent = models.CharField(max_length=255, blank=True, default="")
+    detail = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["verification_code", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"cert-verify:{self.verification_code}:{self.status}"
+
+
 class CreditWallet(TimeStampedModel):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="credit_wallet")
     balance_credits = models.IntegerField(default=0)

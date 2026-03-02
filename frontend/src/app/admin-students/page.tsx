@@ -81,6 +81,17 @@ type StudentCertificatesPayload = {
   student: { id: number; username: string; email: string };
   certificates: StudentCertificateRow[];
 };
+type CertificateVerificationLogRow = {
+  id: number;
+  verification_code: string;
+  status: "VALID" | "REVOKED" | "INVALID_SIGNATURE" | "NOT_FOUND" | "RATE_LIMITED";
+  detail: string;
+  ip_address: string;
+  created_at: string;
+  certificate_code?: string;
+  course_title?: string;
+  student_username?: string;
+};
 
 export default function AdminStudentsPage() {
   const router = useRouter();
@@ -91,6 +102,7 @@ export default function AdminStudentsPage() {
   const [walletDetail, setWalletDetail] = useState<WalletPayload | null>(null);
   const [studentProfile, setStudentProfile] = useState<StudentProfilePayload | null>(null);
   const [studentCertificates, setStudentCertificates] = useState<StudentCertificatesPayload | null>(null);
+  const [verificationLogs, setVerificationLogs] = useState<CertificateVerificationLogRow[]>([]);
   const [certificateActionReason, setCertificateActionReason] = useState("");
   const [reviewNote, setReviewNote] = useState("");
   const [amount, setAmount] = useState("");
@@ -123,6 +135,14 @@ export default function AdminStudentsPage() {
     const payload = await apiFetch<StudentCertificatesPayload>(`/admin/students/${userId}/certificates/`, {}, token);
     setStudentCertificates(payload);
   }, []);
+  const loadVerificationLogs = useCallback(async (token: string, userId: number) => {
+    const payload = await apiFetch<CertificateVerificationLogRow[]>(
+      `/admin/certificates/verification-logs/?user_id=${userId}`,
+      {},
+      token,
+    );
+    setVerificationLogs(payload);
+  }, []);
 
   useEffect(() => {
     const token = accessToken || getAccessToken();
@@ -152,7 +172,8 @@ export default function AdminStudentsPage() {
     loadWallet(token, selectedStudentId).catch(() => setWalletDetail(null));
     loadProfile(token, selectedStudentId).catch(() => setStudentProfile(null));
     loadCertificates(token, selectedStudentId).catch(() => setStudentCertificates(null));
-  }, [accessToken, loadCertificates, loadProfile, loadWallet, selectedStudentId]);
+    loadVerificationLogs(token, selectedStudentId).catch(() => setVerificationLogs([]));
+  }, [accessToken, loadCertificates, loadProfile, loadVerificationLogs, loadWallet, selectedStudentId]);
 
   const adjustCredits = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -197,6 +218,7 @@ export default function AdminStudentsPage() {
       setWalletDetail(null);
       setStudentProfile(null);
       setStudentCertificates(null);
+      setVerificationLogs([]);
       await loadStudents(token);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to expel student.");
@@ -224,6 +246,7 @@ export default function AdminStudentsPage() {
       setNotice(payload.detail);
       setCertificateActionReason("");
       await loadCertificates(token, selectedStudentId);
+      await loadVerificationLogs(token, selectedStudentId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Certificate action failed.");
     } finally {
@@ -403,6 +426,28 @@ export default function AdminStudentsPage() {
             </div>
           </>
         )}
+      </section>
+
+      <section className="mt-6 surface p-5">
+        <h2 className="text-lg font-semibold">Public Verification Events</h2>
+        <p className="mt-2 text-sm muted">Recent checks from the public verify endpoint for this student.</p>
+        <div className="mt-3 max-h-64 overflow-y-auto rounded border border-slate-200">
+          <ul className="divide-y divide-slate-200 text-sm">
+            {verificationLogs.map((row) => (
+              <li key={row.id} className="p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">{row.status}</span>
+                  <span className="text-xs muted">{new Date(row.created_at).toLocaleString()}</span>
+                </div>
+                <p className="mt-1 text-xs muted">
+                  Verify: {row.verification_code} | Cert: {row.certificate_code || "-"} | IP: {row.ip_address || "-"}
+                </p>
+                {row.detail && <p className="mt-1 text-xs">{row.detail}</p>}
+              </li>
+            ))}
+            {verificationLogs.length === 0 && <li className="p-3 text-xs muted">No verification events yet.</li>}
+          </ul>
+        </div>
       </section>
 
       <section className="mt-6 grid gap-4 lg:grid-cols-2">

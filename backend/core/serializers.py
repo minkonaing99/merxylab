@@ -6,6 +6,7 @@ from rest_framework import serializers
 from core.models import (
     Certificate,
     CertificateAuditLog,
+    CertificateVerificationLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -592,3 +593,25 @@ class CertificateAuditLogSerializer(serializers.ModelSerializer):
 
 class AdminCertificateActionSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class CertificateVerificationLogSerializer(serializers.ModelSerializer):
+    certificate_code = serializers.CharField(source="certificate.certificate_code", read_only=True)
+    course_title = serializers.CharField(source="certificate.course.title", read_only=True)
+    student_username = serializers.CharField(source="certificate.user.username", read_only=True)
+
+    class Meta:
+        model = CertificateVerificationLog
+        fields = [
+            "id",
+            "verification_code",
+            "status",
+            "detail",
+            "ip_address",
+            "user_agent",
+            "certificate",
+            "certificate_code",
+            "course_title",
+            "student_username",
+            "created_at",
+        ]

@@ -24,6 +24,7 @@ from core.models import (
     ActiveStreamSession,
     Certificate,
     CertificateAuditLog,
+    CertificateVerificationLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -60,6 +61,7 @@ from core.serializers import (
     AdminUploadVideoSerializer,
     CertificateSerializer,
     CertificateAuditLogSerializer,
+    CertificateVerificationLogSerializer,
     CreditTransactionSerializer,
     CreditWalletSerializer,
     CourseDetailSerializer,
@@ -528,6 +530,26 @@ def _create_certificate_audit_log(*, certificate, action, actor=None, reason="",
         actor=actor,
         reason=(reason or "").strip(),
         meta=meta or {},
+    )
+
+
+def _create_certificate_verification_log(
+    *,
+    verification_code,
+    status,
+    request,
+    certificate=None,
+    detail="",
+):
+    ip_value = _client_ip(request)[:64] if request else ""
+    ua_value = str(request.META.get("HTTP_USER_AGENT", ""))[:255] if request else ""
+    return CertificateVerificationLog.objects.create(
+        certificate=certificate,
+        verification_code=(verification_code or "").strip().upper()[:32],
+        status=status,
+        ip_address=ip_value,
+        user_agent=ua_value,
+        detail=(detail or "")[:255],
     )
 
 
@@ -1306,12 +1328,35 @@ def my_course_certificate(request, course_id):
 @permission_classes([AllowAny])
 def public_verify_certificate(request, verification_code):
     code = str(verification_code or "").strip().upper()
+    ip_key = f"ip:{_safe_subject(_client_ip(request))}"
+    ok, retry_after = _rate_limit_hit(
+        scope="certificate_verify_ip",
+        subject_key=ip_key,
+        limit=int(getattr(settings, "CERT_VERIFY_RATE_LIMIT", 120)),
+        window_seconds=int(getattr(settings, "CERT_VERIFY_RATE_WINDOW_SECONDS", 300)),
+        lock_seconds=int(getattr(settings, "CERT_VERIFY_RATE_LOCK_SECONDS", 300)),
+    )
+    if not ok:
+        _create_certificate_verification_log(
+            verification_code=code,
+            status=CertificateVerificationLog.Status.RATE_LIMITED,
+            request=request,
+            detail="Too many verification requests from this IP.",
+        )
+        return _rate_limit_response("Too many verification requests. Try again later.", retry_after)
+
     certificate = (
         Certificate.objects.select_related("user", "course", "user__student_profile")
         .filter(verification_code=code)
         .first()
     )
     if certificate is None:
+        _create_certificate_verification_log(
+            verification_code=code,
+            status=CertificateVerificationLog.Status.NOT_FOUND,
+            request=request,
+            detail="Verification code not found.",
+        )
         return Response(
             {"valid": False, "status": "not_found", "detail": "Certificate not found."},
             status=status.HTTP_404_NOT_FOUND,
@@ -1336,6 +1381,19 @@ def public_verify_certificate(request, verification_code):
     if not student_name:
         student_name = certificate.user.get_full_name().strip() or certificate.user.username
 
+    log_status = CertificateVerificationLog.Status.VALID
+    if status_label == "revoked":
+        log_status = CertificateVerificationLog.Status.REVOKED
+    elif status_label == "invalid_signature":
+        log_status = CertificateVerificationLog.Status.INVALID_SIGNATURE
+    _create_certificate_verification_log(
+        verification_code=code,
+        status=log_status,
+        request=request,
+        certificate=certificate,
+        detail=detail,
+    )
+
     return Response(
         {
             "valid": bool(status_label == "valid"),
@@ -1355,6 +1413,27 @@ def public_verify_certificate(request, verification_code):
             },
         }
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_verification_logs(request):
+    logs = CertificateVerificationLog.objects.select_related(
+        "certificate",
+        "certificate__course",
+        "certificate__user",
+    ).order_by("-created_at", "-id")
+    code = str(request.query_params.get("verification_code", "")).strip().upper()
+    status_filter = str(request.query_params.get("status", "")).strip().upper()
+    user_id = str(request.query_params.get("user_id", "")).strip()
+    if code:
+        logs = logs.filter(verification_code=code)
+    if status_filter:
+        logs = logs.filter(status=status_filter)
+    if user_id.isdigit():
+        logs = logs.filter(certificate__user_id=int(user_id))
+    logs = logs[:300]
+    return Response(CertificateVerificationLogSerializer(logs, many=True).data)
 
 
 @api_view(["GET"])

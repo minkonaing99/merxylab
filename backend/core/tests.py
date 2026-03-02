@@ -20,6 +20,7 @@ from core.models import (
     Lesson,
     QuizAttempt,
     UserLessonProgress,
+    CertificateVerificationLog,
 )
 
 
@@ -410,6 +411,65 @@ class CoreApiFlowTests(APITransactionTestCase):
         self.assertIn("ISSUED", actions)
         self.assertIn("REVOKED", actions)
         self.assertIn("REISSUED", actions)
+
+    @override_settings(
+        CERT_VERIFY_RATE_LIMIT=1,
+        CERT_VERIFY_RATE_WINDOW_SECONDS=300,
+        CERT_VERIFY_RATE_LOCK_SECONDS=300,
+    )
+    def test_public_verify_rate_limit_and_event_logs(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+        cert = self.client.get(f"/api/courses/{self.course.id}/certificate/")
+        verify_code = cert.data["certificate"]["verification_code"]
+        self.client.credentials()
+
+        first = self.client.get(f"/api/verify/{verify_code}/")
+        self.assertEqual(first.status_code, 200)
+        second = self.client.get(f"/api/verify/{verify_code}/")
+        self.assertEqual(second.status_code, 429)
+        self.assertIn("retry_after_seconds", second.data)
+
+        self.assertTrue(
+            CertificateVerificationLog.objects.filter(
+                verification_code=verify_code,
+                status=CertificateVerificationLog.Status.VALID,
+            ).exists()
+        )
+        self.assertTrue(
+            CertificateVerificationLog.objects.filter(
+                verification_code=verify_code,
+                status=CertificateVerificationLog.Status.RATE_LIMITED,
+            ).exists()
+        )
+
+        self.auth_as_admin()
+        logs = self.client.get(f"/api/admin/certificates/verification-logs/?user_id={self.student.id}")
+        self.assertEqual(logs.status_code, 200)
+        self.assertTrue(any(row["verification_code"] == verify_code for row in logs.data))
 
     def test_final_exam_submit_with_blank_answers_counts_as_fail(self):
         self.auth_as_student()
