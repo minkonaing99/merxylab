@@ -121,8 +121,44 @@ body::before {
   background: var(--surface-soft);
 }
 
-[data-theme="dark"] .theme-icon {
-  filter: brightness(0) invert(1);
+.theme-glyph {
+  display: block;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--foreground);
+  transform: translateY(-0.5px);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+.menu-glyph {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 3.5px;
+  transition: transform 200ms ease;
+  margin: 0 auto;
+}
+
+.menu-glyph > span {
+  display: block;
+  width: 18px;
+  height: 2.2px;
+  border-radius: 9999px;
+  background: var(--foreground);
 }
 
 .btn-danger {

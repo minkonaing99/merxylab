@@ -70,14 +70,16 @@ export function TopNav() {
       aria-label="Toggle dark mode"
       title="Toggle dark mode"
     >
-      <Image src="/theme.svg" alt="" width={16} height={16} aria-hidden="true" className="theme-icon h-4 w-4" />
+      <span className="theme-glyph" aria-hidden="true">
+        {clientTheme === "dark" ? "☀" : "☾"}
+      </span>
       <span className="sr-only">Toggle dark mode</span>
     </button>
   );
 
-  const renderActions = (actionClass: string, onAction?: () => void) => {
+  const renderActions = (actionClass: string, onAction?: () => void, includeTheme = true) => {
     if (isFullscreen) {
-      return role === "admin" ? null : renderThemeToggle(actionClass, onAction);
+      return role === "admin" ? null : (includeTheme ? renderThemeToggle(actionClass, onAction) : null);
     }
 
     if (pathname === "/") {
@@ -91,7 +93,7 @@ export function TopNav() {
     if (pathname === "/login" && !showAuthedNav) {
       return (
         <>
-          {renderThemeToggle(actionClass, onAction)}
+          {includeTheme && renderThemeToggle(actionClass, onAction)}
           <Link className={`${actionClass} btn-secondary`} href="/" onClick={onAction}>
             Home
           </Link>
@@ -105,7 +107,7 @@ export function TopNav() {
     if (pathname === "/register" && !showAuthedNav) {
       return (
         <>
-          {renderThemeToggle(actionClass, onAction)}
+          {includeTheme && renderThemeToggle(actionClass, onAction)}
           <Link className={`${actionClass} btn-secondary`} href="/" onClick={onAction}>
             Home
           </Link>
@@ -119,7 +121,7 @@ export function TopNav() {
     if (!showAuthedNav) {
       return (
         <>
-          {renderThemeToggle(actionClass, onAction)}
+          {includeTheme && renderThemeToggle(actionClass, onAction)}
           <Link className={`${actionClass} btn-secondary`} href="/login" onClick={onAction}>
             Login
           </Link>
@@ -132,7 +134,7 @@ export function TopNav() {
 
     return (
       <>
-        {role !== "admin" && renderThemeToggle(actionClass, onAction)}
+        {role !== "admin" && includeTheme && renderThemeToggle(actionClass, onAction)}
         {role === "admin" && (
           <>
             <Link className={`${actionClass} btn-primary`} href="/admin-ui" onClick={onAction}>
@@ -189,25 +191,32 @@ export function TopNav() {
         </div>
         <div className="sm:hidden">
           {isFullscreen && role !== "admin" ? (
-            renderThemeToggle("btn btn-secondary px-3 py-1.5 text-xs")
+            renderThemeToggle("btn btn-secondary icon-btn")
           ) : (
-          <button
-            type="button"
-            className="btn btn-secondary px-3 py-1.5 text-xs"
-            aria-label="Toggle menu"
-            aria-expanded={mobileOpen}
-            aria-controls="mobile-nav-menu"
-            onClick={() => setMobileOpen((prev) => !prev)}
-          >
-            {mobileOpen ? "Close" : "Menu"}
-          </button>
+            <div className="flex items-center gap-2">
+              {role !== "admin" && renderThemeToggle("btn btn-secondary icon-btn")}
+              <button
+                type="button"
+                className="btn btn-secondary icon-btn"
+                aria-label={mobileOpen ? "Close menu" : "Open menu"}
+                aria-expanded={mobileOpen}
+                aria-controls="mobile-nav-menu"
+                onClick={() => setMobileOpen((prev) => !prev)}
+              >
+                <span className="menu-glyph" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </button>
+            </div>
           )}
         </div>
       </nav>
       {mobileOpen && !isFullscreen && (
         <div id="mobile-nav-menu" className="mx-auto w-full max-w-6xl border-t px-4 pb-3 sm:hidden">
           <div className="grid gap-2 pt-3">
-            {renderActions(mobileActionClass, () => setMobileOpen(false))}
+            {renderActions(mobileActionClass, () => setMobileOpen(false), false)}
           </div>
         </div>
       )}

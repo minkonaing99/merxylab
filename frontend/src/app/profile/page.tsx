@@ -31,6 +31,7 @@ type Eligibility = {
   course_id: number;
   can_take_final_exam: boolean;
   certificate_ready: boolean;
+  profile_completed?: boolean;
   final_exam_result?: {
     attempted: boolean;
     passed: boolean;
@@ -182,12 +183,13 @@ export default function ProfilePage() {
         const eligibilityResults = await Promise.all(
           activeCourses.map(async (course) => {
             try {
-              const [row, cert] = await Promise.all([
-                apiFetch<Eligibility>(`/courses/${course.id}/exam-eligibility/`, {}, token),
-                apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, token).catch(
-                  () => ({ issued: false } as CertificateResponse),
-                ),
-              ]);
+              const row = await apiFetch<Eligibility>(`/courses/${course.id}/exam-eligibility/`, {}, token);
+              const shouldFetchCertificate = Boolean(row.final_exam_result?.passed) && Boolean(row.profile_completed);
+              const cert = shouldFetchCertificate
+                ? await apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, token).catch(
+                    () => ({ issued: false } as CertificateResponse),
+                  )
+                : ({ issued: false } as CertificateResponse);
               return {
                 ...row,
                 course_title: course.title,
@@ -389,7 +391,7 @@ export default function ProfilePage() {
                       Progress: {row.progress.completed_lessons}/{row.progress.total_lessons} ({row.progress.completion_rate}%)
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <div className="flex w-full flex-wrap items-center justify-center gap-2 text-xs sm:w-auto sm:justify-end">
                     {!row.certificate_issued && (
                       <span className={`inline-flex h-9 items-center rounded-full border px-3 ${row.can_take_final_exam ? "border-emerald-300 bg-emerald-500/10 text-emerald-500" : "border-slate-300 bg-slate-500/10 muted"}`}>
                         {row.can_take_final_exam ? "Exam Unlocked" : "Exam Locked"}
@@ -406,17 +408,17 @@ export default function ProfilePage() {
                       </span>
                     )}
                     {row.certificate_issued ? (
-                      <div className="flex flex-wrap gap-2">
+                      <div className="flex w-full flex-wrap justify-center gap-2 sm:w-auto sm:justify-end">
                         <button
                           type="button"
-                          className="btn btn-secondary h-9 px-3"
+                          className="btn btn-secondary h-9 w-full px-3 sm:w-auto"
                           onClick={() => router.push(`/certificates/${row.course_id}`)}
                         >
                           View Certification
                         </button>
                         <button
                           type="button"
-                          className="btn btn-primary h-9 px-3"
+                          className="btn btn-primary h-9 w-full px-3 sm:w-auto"
                           onClick={() => {
                             downloadCertificateTemplate({
                               courseTitle: row.course_title,
@@ -435,7 +437,7 @@ export default function ProfilePage() {
                     ) : row.can_take_final_exam && !row.final_exam_result?.passed && (
                       <button
                         type="button"
-                        className="btn btn-primary px-3 py-1"
+                        className="btn btn-primary w-full px-3 py-1 sm:w-auto"
                         onClick={() => router.push(`/final-exam/${row.course_id}`)}
                       >
                         Take Final Exam

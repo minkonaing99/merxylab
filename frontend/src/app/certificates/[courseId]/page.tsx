@@ -189,10 +189,10 @@ export default function StudentCertificatePage() {
               <p className="mt-3 break-all text-xs muted">
                 Verification URL: {publicVerifyUrl || "Not available"}
               </p>
-              <div className="mt-4 flex flex-wrap gap-2">
+              <div className="mt-4 flex flex-wrap justify-center gap-2 md:justify-start">
                 <button
                   type="button"
-                  className="btn btn-primary"
+                  className="btn btn-primary w-full sm:w-auto"
                   onClick={() =>
                     downloadCertificateTemplate({
                       courseTitle,
@@ -206,17 +206,17 @@ export default function StudentCertificatePage() {
                 >
                   Download Certificate
                 </button>
-                <button type="button" className="btn btn-secondary" onClick={copyVerificationLink}>
+                <button type="button" className="btn btn-secondary w-full sm:w-auto" onClick={copyVerificationLink}>
                   Copy Verification Link
                 </button>
                 {publicVerifyUrl && (
-                  <Link href={publicVerifyUrl} className="btn btn-secondary" target="_blank">
+                  <Link href={publicVerifyUrl} className="btn btn-secondary w-full sm:w-auto" target="_blank">
                     Open Public Verify Page
                   </Link>
                 )}
               </div>
             </div>
-            <div className="surface-soft flex w-full max-w-[220px] flex-col items-center justify-center rounded-xl p-3">
+            <div className="surface-soft mx-auto flex w-full max-w-[220px] flex-col items-center justify-center rounded-xl p-3 md:mx-0">
               {qrImageUrl ? (
                 <img src={qrImageUrl} alt="Certificate QR code" className="h-44 w-44 rounded border border-slate-200 bg-white p-1" />
               ) : (
