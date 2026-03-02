@@ -1362,7 +1362,8 @@ def public_verify_certificate(request, verification_code):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    ensure_certificate_signature(certificate)
+    if not certificate.verification_code or not certificate.signed_payload or not certificate.signature_version:
+        ensure_certificate_signature(certificate)
     signature_valid, signature_state = validate_certificate_signature(certificate)
 
     status_label = "valid"

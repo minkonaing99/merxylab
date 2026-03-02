@@ -471,6 +471,87 @@ class CoreApiFlowTests(APITransactionTestCase):
         self.assertEqual(logs.status_code, 200)
         self.assertTrue(any(row["verification_code"] == verify_code for row in logs.data))
 
+    def test_public_verify_detects_tampered_signed_payload(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+
+        cert = Certificate.objects.get(user=self.student, course=self.course)
+        verify_code = cert.verification_code
+        cert.signed_payload = f"{cert.signed_payload}.tampered"
+        cert.save(update_fields=["signed_payload", "updated_at"])
+
+        tampered = self.client.get(f"/api/verify/{verify_code}/")
+        self.assertEqual(tampered.status_code, 200)
+        self.assertFalse(tampered.data["valid"])
+        self.assertEqual(tampered.data["status"], "invalid_signature")
+
+    def test_legacy_certificate_missing_signature_fields_backfills_on_read(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+
+        cert = Certificate.objects.get(user=self.student, course=self.course)
+        cert.verification_code = ""
+        cert.signed_payload = ""
+        cert.signature_version = 0
+        cert.save(update_fields=["verification_code", "signed_payload", "signature_version", "updated_at"])
+
+        payload = self.client.get(f"/api/courses/{self.course.id}/certificate/")
+        self.assertEqual(payload.status_code, 200)
+        self.assertTrue(payload.data["issued"])
+        self.assertTrue(payload.data["certificate"]["verification_code"])
+        self.assertTrue(payload.data["certificate"]["signed_payload"])
+        self.assertEqual(payload.data["certificate"]["signature_version"], 1)
+
+        verify = self.client.get(f"/api/verify/{payload.data['certificate']['verification_code']}/")
+        self.assertEqual(verify.status_code, 200)
+        self.assertTrue(verify.data["valid"])
+
     def test_final_exam_submit_with_blank_answers_counts_as_fail(self):
         self.auth_as_student()
         self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")

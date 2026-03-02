@@ -143,3 +143,49 @@ MerxyLab is valuable when teaching teams need:
 - Controlled media access for paid/private programs.
 - Admin workflows for learner verification and financial controls.
 - A single platform covering content, assessment, and certification.
+
+## Certificate Trust Rollout (Phase 9)
+
+For production rollout, apply this sequence:
+
+1. Deploy backend code and run migrations:
+   - `python backend/manage.py migrate`
+2. Backfill existing certificates (safe to run multiple times):
+   - `python backend/manage.py backfill_certificate_signatures`
+   - Optional preview first: `python backend/manage.py backfill_certificate_signatures --dry-run`
+3. Verify public endpoint:
+   - `GET /api/verify/{verification_code}/`
+4. Verify admin controls:
+   - Revoke: `POST /api/admin/certificates/{id}/revoke/`
+   - Reissue: `POST /api/admin/certificates/{id}/reissue/`
+   - Audit feed: `GET /api/admin/certificates/audit/`
+   - Verification event feed: `GET /api/admin/certificates/verification-logs/`
+
+Rollout note:
+- Public verify now has IP rate limiting. Tune with:
+  - `CERT_VERIFY_RATE_LIMIT`
+  - `CERT_VERIFY_RATE_WINDOW_SECONDS`
+  - `CERT_VERIFY_RATE_LOCK_SECONDS`
+
+## Acceptance Checklist (Phase 10)
+
+Minimum acceptance criteria before release:
+
+1. QR/verify path
+   - Download certificate and scan QR.
+   - Verify it opens `/verify/{code}` and shows `valid`.
+2. Tamper detection
+   - Any signed payload corruption must return `invalid_signature`.
+3. Revocation behavior
+   - Revoked certificate must return `revoked` in public verify.
+4. Reissue behavior
+   - Reissued certificate must produce new `certificate_code` and `verification_code`.
+   - Old verification code must no longer resolve.
+5. Legacy compatibility
+   - Certificates missing verification/signature fields are backfilled and become verifiable.
+6. Monitoring
+   - Verification events visible in admin verification logs.
+   - Rate-limited requests logged as `RATE_LIMITED`.
+
+Automated coverage:
+- `python backend/manage.py test core.tests.CoreApiFlowTests`
