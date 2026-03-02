@@ -68,10 +68,12 @@ export default function AdminStudentsPage() {
   const [reviewNote, setReviewNote] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const [expelConfirm, setExpelConfirm] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  const expelPhrase = "I would like to expell this student";
 
   useEffect(() => {
     setTheme("light");
@@ -140,6 +142,31 @@ export default function AdminStudentsPage() {
       setNotice("Credits updated.");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to adjust credits.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const expelStudent = async () => {
+    const token = accessToken || getAccessToken();
+    if (!token || !selectedStudentId || expelConfirm !== expelPhrase) return;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = await apiFetch<{ detail: string }>(
+        `/admin/students/${selectedStudentId}/expel/`,
+        { method: "POST", body: JSON.stringify({ confirmation: expelConfirm }) },
+        token,
+      );
+      setNotice(payload.detail);
+      setExpelConfirm("");
+      setSelectedStudentId(null);
+      setWalletDetail(null);
+      setStudentProfile(null);
+      await loadStudents(token);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to expel student.");
     } finally {
       setLoading(false);
     }
@@ -408,6 +435,32 @@ export default function AdminStudentsPage() {
                   ))}
                   {walletDetail.enrollments.length === 0 && <li className="text-xs muted">No enrolled courses.</li>}
                 </ul>
+              </div>
+
+              <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3">
+                <h3 className="text-sm font-semibold text-red-700">Danger Zone</h3>
+                <p className="mt-1 text-xs text-red-600">
+                  This will permanently remove the student account and related data.
+                </p>
+                <label className="mt-2 block text-xs text-red-700">
+                  Type exactly:
+                  {" "}
+                  <strong>{expelPhrase}</strong>
+                </label>
+                <input
+                  className="input mt-1"
+                  placeholder={expelPhrase}
+                  value={expelConfirm}
+                  onChange={(e) => setExpelConfirm(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-danger mt-2"
+                  onClick={expelStudent}
+                  disabled={loading || expelConfirm !== expelPhrase}
+                >
+                  Expel Student
+                </button>
               </div>
             </>
           )}

@@ -488,6 +488,28 @@ def register(request):
 
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
+def username_available(request):
+    username = str(request.query_params.get("username", "")).strip()
+    if not username:
+        return Response({"available": False, "detail": "Username is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(username) < 3:
+        return Response(
+            {"available": False, "detail": "Username must be at least 3 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user_model = get_user_model()
+    exists = user_model.objects.filter(username=username).exists()
+    return Response(
+        {
+            "available": not exists,
+            "detail": "Username is available." if not exists else "Username is already taken.",
+        }
+    )
+
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
     user = request.user
@@ -1636,6 +1658,32 @@ def admin_student_wallet_adjust(request, user_id):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_expel(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts can be expelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+    confirmation = str(request.data.get("confirmation", "")).strip()
+    expected = "I would like to expell this student"
+    if confirmation != expected:
+        return Response(
+            {"detail": f"Confirmation text must match exactly: '{expected}'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Remove uploaded passport file explicitly before user delete.
+    profile = StudentProfile.objects.filter(user=student).first()
+    if profile and profile.passport_photo:
+        profile.passport_photo.delete(save=False)
+
+    username = student.username
+    student.delete()
+    return Response({"detail": f"Student '{username}' has been expelled and removed."}, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
