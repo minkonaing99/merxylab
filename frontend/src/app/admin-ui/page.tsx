@@ -6,6 +6,7 @@ import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
 import { setTheme } from "@/lib/theme";
+import { useAdminUploadTracker } from "@/components/admin-upload-tracker";
 
 type Course = {
   id: number;
@@ -186,6 +187,7 @@ export default function AdminUiPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "processing">("idle");
   const [uploadJob, setUploadJob] = useState<UploadJob | null>(null);
+  const [uploadTrackerKey, setUploadTrackerKey] = useState<string | null>(null);
   const uploadPollingCancelledRef = useRef(false);
   const [dragOver, setDragOver] = useState(false);
   const [courseEnrollments, setCourseEnrollments] = useState<EnrollmentRow[]>([]);
@@ -266,6 +268,14 @@ export default function AdminUiPage() {
   const [finalExamInputMode, setFinalExamInputMode] = useState<"manual" | "json">("manual");
   const [finalExamJsonInput, setFinalExamJsonInput] = useState(FINAL_EXAM_JSON_SAMPLE);
   const [finalExamExists, setFinalExamExists] = useState(false);
+  const {
+    beginUploading,
+    updateUploadingProgress,
+    markUploadFailed,
+    bindServerJob,
+    upsertServerJob,
+    clearJob,
+  } = useAdminUploadTracker();
 
   useEffect(() => {
     setTheme("light");
@@ -579,6 +589,14 @@ export default function AdminUiPage() {
   const uploadVideo = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!accessToken || !videoFile || !selectedLessonIdForVideo) return;
+    const selectedCourse = courses.find((course) => course.id === selectedCourseId);
+    const selectedLesson = selectedCourseLessons.find((lesson) => lesson.id === selectedLessonIdForVideo);
+    const trackerLocalKey = beginUploading({
+      videoName: videoFile.name,
+      courseLabel: selectedCourse?.title ?? `Course ${selectedCourseId}`,
+      lessonLabel: selectedLesson?.title ?? `Lesson ${selectedLessonIdForVideo}`,
+    });
+    setUploadTrackerKey(trackerLocalKey);
     setLoading(true);
     setFeedback(null);
     setUploadProgress(0);
@@ -597,6 +615,7 @@ export default function AdminUiPage() {
           if (!e.lengthComputable) return;
           const percent = Math.round((e.loaded / e.total) * 100);
           setUploadProgress(percent);
+          updateUploadingProgress(trackerLocalKey, percent);
           if (percent >= 100) {
             setUploadPhase("processing");
           }
@@ -630,6 +649,8 @@ export default function AdminUiPage() {
       setVideoFile(null);
       setUploadPhase("processing");
       setUploadJob(job);
+      const serverKey = bindServerJob(trackerLocalKey, job);
+      setUploadTrackerKey(serverKey);
       setFeedback({ target: "step3-upload", type: "success", message: "Video uploaded. Transcoding queued in background." });
 
       const pollJob = async () => {
@@ -644,11 +665,14 @@ export default function AdminUiPage() {
             if (uploadPollingCancelledRef.current) return;
             setUploadJob(latest);
             setUploadProgress(Math.max(5, Math.min(100, latest.progress_percent || 0)));
+            upsertServerJob(latest);
 
             if (latest.status === "COMPLETED") {
               setUploadPhase("idle");
               setUploadProgress(100);
               setUploadJob(null);
+              clearJob(latest.id);
+              setUploadTrackerKey(null);
               setFeedback({ target: "step3-upload", type: "success", message: "Video transcoding completed." });
               await loadData();
               window.setTimeout(() => setUploadProgress(0), 1200);
@@ -657,6 +681,8 @@ export default function AdminUiPage() {
             if (latest.status === "FAILED") {
               setUploadPhase("idle");
               setUploadJob(null);
+              clearJob(latest.id);
+              setUploadTrackerKey(null);
               setFeedback({
                 target: "step3-upload",
                 type: "error",
@@ -667,6 +693,8 @@ export default function AdminUiPage() {
           } catch (err) {
             setUploadPhase("idle");
             setUploadJob(null);
+            clearJob(job.id);
+            setUploadTrackerKey(null);
             setFeedback({
               target: "step3-upload",
               type: "error",
@@ -677,6 +705,8 @@ export default function AdminUiPage() {
         }
         setUploadPhase("idle");
         setUploadJob(null);
+        clearJob(job.id);
+        setUploadTrackerKey(null);
         setFeedback({
           target: "step3-upload",
           type: "error",
@@ -688,6 +718,12 @@ export default function AdminUiPage() {
       setFeedback({ target: "step3-upload", type: "error", message: err instanceof Error ? err.message : "Video upload failed." });
       setUploadPhase("idle");
       setUploadJob(null);
+      if (uploadTrackerKey) {
+        markUploadFailed(uploadTrackerKey, err instanceof Error ? err.message : "Video upload failed.");
+      } else {
+        markUploadFailed(trackerLocalKey, err instanceof Error ? err.message : "Video upload failed.");
+      }
+      setUploadTrackerKey(null);
     } finally {
       setLoading(false);
     }
@@ -1275,7 +1311,7 @@ export default function AdminUiPage() {
           </div>
 
           <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
+            <table className="min-w-[720px] text-left text-sm">
               <thead className="border-b text-slate-600">
                 <tr>
                   <th className="py-2 pr-4">Course</th>
@@ -1312,23 +1348,23 @@ export default function AdminUiPage() {
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Build Workflow Checklist</h2>
           <ul className="mt-3 space-y-2 text-sm">
-            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+            <li className="flex flex-col gap-1 rounded border border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <span>1. Create course</span>
               <span className={workflowStatus.step1 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step1 ? "Done" : "Pending"}</span>
             </li>
-            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+            <li className="flex flex-col gap-1 rounded border border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <span>2. Add lessons</span>
               <span className={workflowStatus.step2 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step2 ? "Done" : "Pending"}</span>
             </li>
-            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+            <li className="flex flex-col gap-1 rounded border border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <span>3. Upload video</span>
               <span className={workflowStatus.step3 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step3 ? "Done" : "Pending"}</span>
             </li>
-            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+            <li className="flex flex-col gap-1 rounded border border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <span>4. Build lesson quiz</span>
               <span className={workflowStatus.step4 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step4 ? "Done" : "Pending"}</span>
             </li>
-            <li className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+            <li className="flex flex-col gap-1 rounded border border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <span>5. Build final exam</span>
               <span className={workflowStatus.step5 ? "text-emerald-700" : "text-slate-500"}>{workflowStatus.step5 ? "Done" : "Pending"}</span>
             </li>
@@ -1495,7 +1531,7 @@ export default function AdminUiPage() {
                 />
                 <p className="text-sm font-medium text-slate-800">Drag video here or click to choose</p>
                 <p className="mt-1 text-xs text-slate-500">Supported: mp4, mov, mkv, webm</p>
-                {videoFile && <p className="mt-2 text-xs text-emerald-700">Selected: {videoFile.name}</p>}
+                {videoFile && <p className="mt-2 break-all text-xs text-emerald-700">Selected: {videoFile.name}</p>}
               </label>
               <button disabled={loading || !videoFile || !selectedLessonIdForVideo || Boolean(uploadJob)} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
                 {loading ? "Uploading..." : uploadJob ? "Transcoding..." : "Upload & Convert"}
@@ -1519,11 +1555,16 @@ export default function AdminUiPage() {
                 <span>{uploadPhase === "uploading" ? `${uploadProgress}%` : `${uploadProgress}%`}</span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                {uploadPhase !== "uploading" && (!uploadJob || uploadJob.status !== "COMPLETED") ? (
-                  <div className={`h-full w-1/3 animate-pulse ${uploadJob?.status === "RETRYING" ? "bg-amber-600" : "bg-blue-600"}`} />
-                ) : (
-                  <div className="h-full bg-emerald-600 transition-all" style={{ width: `${uploadProgress}%` }} />
-                )}
+                <div
+                  className={`h-full transition-all duration-500 ${
+                    uploadJob?.status === "COMPLETED"
+                      ? "bg-emerald-600"
+                      : uploadJob?.status === "RETRYING"
+                        ? "bg-amber-600"
+                        : "bg-blue-600"
+                  }`}
+                  style={{ width: `${Math.max(0, Math.min(100, uploadProgress))}%` }}
+                />
               </div>
               {uploadJob && (
                 <p className="mt-1 text-xs text-slate-500">
@@ -1563,8 +1604,8 @@ export default function AdminUiPage() {
                 <input className="w-full rounded border px-3 py-2" placeholder={`Question ${qIndex + 1}`} value={question.prompt} onChange={(e) => updateQuestion(qIndex, { prompt: e.target.value })} />
                 <div className="mt-2 space-y-2">
                   {question.choices.map((choice, cIndex) => (
-                    <div key={cIndex} className="flex items-center gap-2">
-                      <input className="flex-1 rounded border px-3 py-2" placeholder={`Choice ${cIndex + 1}`} value={choice.text} onChange={(e) => updateChoice(qIndex, cIndex, { text: e.target.value })} />
+                    <div key={cIndex} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <input className="w-full flex-1 rounded border px-3 py-2" placeholder={`Choice ${cIndex + 1}`} value={choice.text} onChange={(e) => updateChoice(qIndex, cIndex, { text: e.target.value })} />
                       <label className="flex items-center gap-1 text-xs">
                         <input type="checkbox" checked={choice.is_correct} onChange={(e) => updateChoice(qIndex, cIndex, { is_correct: e.target.checked })} />
                         Correct
@@ -1667,9 +1708,9 @@ export default function AdminUiPage() {
                       />
                       <div className="mt-2 space-y-2">
                         {question.choices.map((choice, cIndex) => (
-                          <div key={cIndex} className="flex items-center gap-2">
+                          <div key={cIndex} className="flex flex-col gap-2 sm:flex-row sm:items-center">
                             <input
-                              className="flex-1 rounded border px-3 py-2"
+                              className="w-full flex-1 rounded border px-3 py-2"
                               placeholder={`Choice ${cIndex + 1}`}
                               value={choice.text}
                               onChange={(e) => updateFinalExamChoice(qIndex, cIndex, { text: e.target.value })}
@@ -1802,7 +1843,7 @@ export default function AdminUiPage() {
                   <input type="checkbox" checked={editCourseForm.is_published} onChange={(e) => setEditCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
                   Published
                 </label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Course</button>
                   <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteCourse}>Delete Course</button>
                   <button
@@ -1878,7 +1919,7 @@ export default function AdminUiPage() {
                   </>
                 )}
                 <p className="text-xs text-slate-500">Public preview is automatic for the first 2 lessons in each course.</p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Lesson</button>
                   <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteLesson}>Delete Lesson</button>
                 </div>
@@ -1916,7 +1957,7 @@ export default function AdminUiPage() {
               <form onSubmit={saveQuizEdits} className="mt-3 grid gap-2 md:grid-cols-3">
                 <input type="number" min={0} max={100} className="rounded border px-3 py-2" value={editQuizForm.passing_score} onChange={(e) => setEditQuizForm((v) => ({ ...v, passing_score: Number(e.target.value) }))} placeholder="Passing score %" />
                 <input type="number" min={1} className="rounded border px-3 py-2" value={editQuizForm.time_limit_sec} onChange={(e) => setEditQuizForm((v) => ({ ...v, time_limit_sec: e.target.value }))} placeholder="Time limit sec" />
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Quiz</button>
                   <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteQuiz}>Delete Quiz</button>
                 </div>
@@ -1949,7 +1990,7 @@ export default function AdminUiPage() {
               </div>
               <div className="mt-4 space-y-2">
                 {finalExamForm.questions.map((question, index) => (
-                  <div key={`manage-${question.id ?? "new"}-${index}`} className="flex items-start justify-between gap-3 rounded border border-slate-200 bg-slate-50 p-3">
+                  <div key={`manage-${question.id ?? "new"}-${index}`} className="flex flex-col gap-3 rounded border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <p className="text-sm font-medium">{index + 1}. {question.prompt || "(No question text yet)"}</p>
                       <p className="text-xs text-slate-500">Choices: {question.choices.length}</p>

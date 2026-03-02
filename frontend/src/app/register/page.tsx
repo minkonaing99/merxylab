@@ -63,7 +63,7 @@ export default function RegisterPage() {
     }
     apiFetch<{ role?: string }>("/me/", {}, token)
       .then((me) => {
-        router.replace(me.role === "admin" ? "/admin-ui" : "/dashboard");
+        router.replace(me.role === "admin" ? "/admin-students" : "/dashboard");
       })
       .catch(() => {
         setAuthChecking(false);

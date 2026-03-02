@@ -13,7 +13,7 @@ from django.core import signing
 from django.core.files.base import ContentFile
 from django.core.exceptions import SuspiciousFileOperation
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -1075,7 +1075,25 @@ def enroll_course(request, course_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_enrollments(request):
-    enrollments = Enrollment.objects.filter(user=request.user).select_related("course").order_by("-enrolled_at")
+    enrollments = list(Enrollment.objects.filter(user=request.user).select_related("course"))
+    if not enrollments:
+        return Response([])
+
+    latest_progress_by_course = {
+        row["lesson__course_id"]: row["latest_progress"]
+        for row in UserLessonProgress.objects.filter(user=request.user)
+        .values("lesson__course_id")
+        .annotate(latest_progress=Max("updated_at"))
+    }
+
+    # Last watched/accessed course first, then fallback to most recently enrolled.
+    enrollments.sort(
+        key=lambda e: (
+            latest_progress_by_course.get(e.course_id) or e.enrolled_at,
+            e.enrolled_at,
+        ),
+        reverse=True,
+    )
     return Response(EnrollmentSerializer(enrollments, many=True).data)
 
 

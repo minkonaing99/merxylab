@@ -160,7 +160,7 @@ export default function ProfilePage() {
           apiFetch<Enrollment[]>("/me/enrollments/", {}, token),
         ]);
         if (me.role === "admin") {
-          router.replace("/admin-ui");
+          router.replace("/admin-students");
           return;
         }
         setForm({

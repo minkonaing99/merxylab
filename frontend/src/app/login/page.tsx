@@ -29,7 +29,7 @@ export default function LoginPage() {
     }
     apiFetch<{ role?: string }>("/me/", {}, token)
       .then((me) => {
-        router.replace(me.role === "admin" ? "/admin-ui" : "/dashboard");
+        router.replace(me.role === "admin" ? "/admin-students" : "/dashboard");
       })
       .catch(() => {
         setAuthChecking(false);
@@ -50,7 +50,8 @@ export default function LoginPage() {
         typeof window !== "undefined"
           ? new URLSearchParams(window.location.search).get("next") || "/dashboard"
           : "/dashboard";
-      router.push(nextPath);
+      const resolvedPath = nextPath === "/dashboard" ? ((await apiFetch<{ role?: string }>("/me/", {}, payload.access)).role === "admin" ? "/admin-students" : "/dashboard") : nextPath;
+      router.push(resolvedPath);
     } catch (err) {
       const rawMessage = err instanceof ApiError ? err.message : "Login failed.";
       const message =

@@ -2,9 +2,10 @@
 
 MerxyLab is a structured online teaching platform built for practical skill programs where learners progress step-by-step and instructors maintain strong control over delivery quality.
 
-## What's New (v1.2.0)
+## What's New
 
 - Async video processing with Celery + Redis (upload queue + background transcoding).
+- Global admin upload tracker panel (bottom-right) across admin pages while jobs are active.
 - Course scheduling controls (publish/unpublish windows).
 - Stronger auth/exam rate-limit and lockout controls.
 - Final exam anti-cheat baseline (fullscreen/session behavior + tab-switch handling).
@@ -63,6 +64,21 @@ playwright install chromium
 
 ```bash
 python backend/manage.py migrate
+```
+
+### Start local stack (3 terminals)
+
+```bash
+# Terminal 1
+python backend/manage.py runserver 8000
+
+# Terminal 2
+cd backend
+python -m celery -A config worker -l info
+
+# Terminal 3
+cd frontend
+npm run dev
 ```
 
 ### Run tests
