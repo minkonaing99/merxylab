@@ -692,11 +692,7 @@ def _ensure_certificate_pdf(certificate, request=None):
             pass
 
     ensure_certificate_signature(certificate)
-    verification_url = (
-        request.build_absolute_uri(f"/verify/{certificate.verification_code}")
-        if request
-        else f"http://localhost:3000/verify/{certificate.verification_code}"
-    )
+    verification_url = f"{settings.FRONTEND_BASE_URL}/verify/{certificate.verification_code}"
     student_name = _student_display_name(certificate.user)
     html = _certificate_pdf_html(
         student_name=student_name,
@@ -714,6 +710,46 @@ def _ensure_certificate_pdf(certificate, request=None):
     filename = f"certificates/pdfs/{safe_course}-{certificate.certificate_code}.pdf"
     certificate.certificate_pdf.save(filename, ContentFile(pdf_bytes), save=True)
     return True, ""
+
+
+def _ensure_course_certificate_for_user(user, course, request=None):
+    certificate = (
+        Certificate.objects.filter(user=user, course=course)
+        .select_related("exam_attempt", "course", "user")
+        .first()
+    )
+    if certificate is not None:
+        ensure_certificate_signature(certificate)
+        return certificate, False
+
+    exam = FinalExam.objects.filter(course=course, is_published=True).first()
+    if exam is None:
+        return None, False
+
+    passed_attempt = (
+        FinalExamAttempt.objects.filter(user=user, exam=exam, passed=True)
+        .order_by("-attempted_at", "-id")
+        .first()
+    )
+    if passed_attempt is None:
+        return None, False
+
+    certificate = Certificate.objects.create(
+        user=user,
+        course=course,
+        exam_attempt=passed_attempt,
+        certificate_code=_new_certificate_code(),
+    )
+    ensure_certificate_signature(certificate)
+    _create_certificate_audit_log(
+        certificate=certificate,
+        action=CertificateAuditLog.Action.ISSUED,
+        actor=user,
+        reason="Certificate issued after profile verification from existing passed final exam.",
+        meta={"course_id": course.id, "exam_attempt_id": passed_attempt.id, "issued_from_existing_pass": True},
+    )
+    _ensure_certificate_pdf(certificate, request=request)
+    return certificate, True
 
 
 def _active_session_for_token(payload, lesson_id):
@@ -1483,10 +1519,9 @@ def my_course_certificate(request, course_id):
             {"detail": "Profile verification is required before certificate access."},
             status=status.HTTP_403_FORBIDDEN,
         )
-    certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
+    certificate, _created_now = _ensure_course_certificate_for_user(request.user, course, request=request)
     if certificate is None:
         return Response({"issued": False, "detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
-    ensure_certificate_signature(certificate)
     return Response(
         {
             "issued": True,
@@ -1507,7 +1542,7 @@ def my_course_certificate_pdf(request, course_id):
             {"detail": "Profile verification is required before certificate access."},
             status=status.HTTP_403_FORBIDDEN,
         )
-    certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
+    certificate, _created_now = _ensure_course_certificate_for_user(request.user, course, request=request)
     if certificate is None:
         return Response({"detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
 

@@ -1,6 +1,7 @@
 import re
 from datetime import date
 
+from django.conf import settings
 from rest_framework import serializers
 
 from core.models import (
@@ -529,11 +530,7 @@ class CertificateSerializer(serializers.ModelSerializer):
         ]
 
     def get_verification_url(self, obj):
-        request = self.context.get("request")
-        path = f"/api/verify/{obj.verification_code}/"
-        if request:
-            return request.build_absolute_uri(path)
-        return path
+        return f"{settings.FRONTEND_BASE_URL}/verify/{obj.verification_code}"
 
 
 class CreditTransactionSerializer(serializers.ModelSerializer):

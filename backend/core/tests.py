@@ -594,6 +594,58 @@ class CoreApiFlowTests(APITransactionTestCase):
         self.assertIn("certificate_blocked_reason", submit.data)
         self.assertEqual(Certificate.objects.filter(user=self.student, course=self.course).count(), 0)
 
+    def test_certificate_issued_after_later_profile_approval_without_retake(self):
+        profile = StudentProfile.objects.get(user=self.student)
+        profile.verification_status = StudentProfile.VerificationStatus.PENDING
+        profile.save(update_fields=["verification_status", "updated_at"])
+
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        submit = self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+        self.assertEqual(submit.status_code, 201)
+        self.assertTrue(submit.data["passed"])
+        self.assertFalse(submit.data["certificate_issued"])
+        self.assertEqual(Certificate.objects.filter(user=self.student, course=self.course).count(), 0)
+
+        attempts_before = self.client.get(f"/api/courses/{self.course.id}/final-exam/attempts/")
+        self.assertEqual(attempts_before.status_code, 200)
+        self.assertEqual(len(attempts_before.data), 1)
+
+        profile.verification_status = StudentProfile.VerificationStatus.VERIFIED
+        profile.save(update_fields=["verification_status", "updated_at"])
+
+        cert = self.client.get(f"/api/courses/{self.course.id}/certificate/")
+        self.assertEqual(cert.status_code, 200)
+        self.assertTrue(cert.data["issued"])
+        self.assertEqual(Certificate.objects.filter(user=self.student, course=self.course).count(), 1)
+
+        attempts_after = self.client.get(f"/api/courses/{self.course.id}/final-exam/attempts/")
+        self.assertEqual(attempts_after.status_code, 200)
+        self.assertEqual(len(attempts_after.data), 1)
+
     def test_certificate_view_forbidden_when_profile_not_verified(self):
         profile = StudentProfile.objects.get(user=self.student)
         profile.verification_status = StudentProfile.VerificationStatus.PENDING
