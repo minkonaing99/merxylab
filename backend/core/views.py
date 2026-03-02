@@ -1,12 +1,9 @@
 import mimetypes
 import random
 import shutil
-import subprocess
-import tempfile
 import uuid
 from datetime import timedelta
 from pathlib import Path
-import glob
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -29,7 +26,9 @@ from core.models import (
     Course,
     CreditTransaction,
     CreditWallet,
+    EndpointRateLimit,
     Enrollment,
+    VideoTranscodeJob,
     FinalExam,
     FinalExamAttempt,
     FinalExamChoice,
@@ -40,6 +39,7 @@ from core.models import (
     StudentProfile,
     UserLessonProgress,
 )
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from core.permissions import IsAdminRole
 from core.mongo_store import delete_quiz_payload, get_quiz_map, get_quiz_payload, set_quiz_payload
 from core.serializers import (
@@ -97,10 +97,89 @@ class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField()
 
 
+def _client_ip(request):
+    forwarded_for = (request.META.get("HTTP_X_FORWARDED_FOR", "") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return (request.META.get("REMOTE_ADDR", "") or "").strip() or "unknown"
+
+
+def _safe_subject(value):
+    return str(value or "").strip().lower()[:180] or "unknown"
+
+
+def _rate_limit_response(detail, retry_after_seconds):
+    return Response(
+        {
+            "detail": detail,
+            "retry_after_seconds": max(int(retry_after_seconds), 1),
+        },
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
+    )
+
+
+def _rate_limit_hit(*, scope, subject_key, limit, window_seconds, lock_seconds, now=None):
+    now = now or timezone.now()
+    with transaction.atomic():
+        row, _ = EndpointRateLimit.objects.select_for_update().get_or_create(
+            scope=scope,
+            subject_key=subject_key,
+            defaults={
+                "window_started_at": now,
+                "attempt_count": 0,
+                "locked_until": None,
+            },
+        )
+        if row.locked_until and now < row.locked_until:
+            wait_seconds = int((row.locked_until - now).total_seconds())
+            return False, max(wait_seconds, 1)
+
+        window_delta = timedelta(seconds=window_seconds)
+        if row.window_started_at <= now - window_delta:
+            row.window_started_at = now
+            row.attempt_count = 0
+            row.locked_until = None
+
+        row.attempt_count += 1
+        if row.attempt_count > int(limit):
+            row.locked_until = now + timedelta(seconds=lock_seconds)
+            row.save(update_fields=["window_started_at", "attempt_count", "locked_until", "updated_at"])
+            wait_seconds = int((row.locked_until - now).total_seconds())
+            return False, max(wait_seconds, 1)
+
+        row.save(update_fields=["window_started_at", "attempt_count", "locked_until", "updated_at"])
+        return True, 0
+
+
+def _rate_limit_reset(*, scope, subject_key):
+    EndpointRateLimit.objects.filter(scope=scope, subject_key=subject_key).delete()
+
+
 def _role_for_user(user):
     if user.is_superuser or user.groups.filter(name="admin").exists():
         return "admin"
     return "student"
+
+
+def _is_course_live(course, now=None):
+    now = now or timezone.now()
+    if not course.is_published:
+        return False
+    if course.publish_at and now < course.publish_at:
+        return False
+    if course.unpublish_at and now >= course.unpublish_at:
+        return False
+    return True
+
+
+def _assert_course_live(course):
+    if not _is_course_live(course):
+        raise Http404("Course not found.")
+
+
+def _free_lesson_ids(course, lessons=None):
+    ordered = lessons if lessons is not None else _ordered_course_lessons(course)
+    return {lesson.id for lesson in ordered[:2]}
 
 
 def _is_enrolled(user, course):
@@ -114,7 +193,7 @@ def _is_enrolled(user, course):
 
 
 def _can_access_lesson(user, lesson):
-    if lesson.is_preview:
+    if lesson.id in _free_lesson_ids(lesson.course):
         return True
     if not _is_enrolled(user, lesson.course):
         return False
@@ -159,17 +238,11 @@ def _effective_completed_lesson_ids(user, course, lessons=None, quiz_map=None):
 
 def _unlocked_lesson_ids(user, course):
     lessons = _ordered_course_lessons(course)
-    unlocked = set()
+    unlocked = set(_free_lesson_ids(course, lessons))
     if not user.is_authenticated:
-        for lesson in lessons:
-            if lesson.is_preview:
-                unlocked.add(lesson.id)
         return unlocked
 
     if not _is_enrolled(user, course):
-        for lesson in lessons:
-            if lesson.is_preview:
-                unlocked.add(lesson.id)
         return unlocked
 
     quiz_map = get_quiz_map(lessons)
@@ -184,8 +257,7 @@ def _unlocked_lesson_ids(user, course):
     quiz_lesson_ids = set(quiz_map.keys())
 
     for idx, lesson in enumerate(lessons):
-        if lesson.is_preview:
-            unlocked.add(lesson.id)
+        if lesson.id in unlocked:
             continue
 
         if idx == 0:
@@ -207,7 +279,7 @@ def _unlocked_lesson_ids(user, course):
 
 
 def _lesson_access_denial_message(user, lesson):
-    if lesson.is_preview:
+    if lesson.id in _free_lesson_ids(lesson.course):
         return ""
     if not _is_enrolled(user, lesson.course):
         return "Enrollment required for this lesson."
@@ -364,6 +436,21 @@ def _build_playback_url(lesson_id):
     return f"/api/stream/hls/{lesson_id}/master.m3u8"
 
 
+def _issue_quiz_session_token(*, user_id, lesson_id, question_ids, choice_map):
+    payload = {
+        "uid": int(user_id),
+        "lid": int(lesson_id),
+        "qids": [int(qid) for qid in question_ids],
+        "cm": {str(k): [int(cid) for cid in v] for k, v in choice_map.items()},
+    }
+    return signing.dumps(payload, salt="lesson-quiz-session")
+
+
+def _decode_quiz_session_token(token):
+    max_age = int(getattr(settings, "QUIZ_SESSION_TOKEN_TTL_SECONDS", 7200))
+    return signing.loads(token, max_age=max_age, salt="lesson-quiz-session")
+
+
 def _lesson_asset_path(lesson, asset_name):
     if not lesson.hls_master_path:
         raise Http404("Lesson has no HLS path configured.")
@@ -396,6 +483,7 @@ def _remove_media_dir(path: Path):
 def _cleanup_lesson_media_files(lesson):
     # Primary deterministic folder used by upload pipeline.
     _remove_media_dir(Path(settings.MEDIA_ROOT) / "hls" / f"course_{lesson.course_id}" / f"lesson_{lesson.id}")
+    _remove_media_dir(Path(settings.MEDIA_ROOT) / "uploads" / f"course_{lesson.course_id}" / f"lesson_{lesson.id}")
 
     # Secondary fallback if lesson path points to a different relative location.
     if lesson.hls_master_path:
@@ -408,34 +496,25 @@ def _cleanup_lesson_media_files(lesson):
 
 def _cleanup_course_media_files(course_id):
     _remove_media_dir(Path(settings.MEDIA_ROOT) / "hls" / f"course_{course_id}")
+    _remove_media_dir(Path(settings.MEDIA_ROOT) / "uploads" / f"course_{course_id}")
 
 
-def _resolve_binary(explicit_path, command_name):
-    if explicit_path and Path(explicit_path).exists():
-        return explicit_path
-
-    detected = shutil.which(command_name)
-    if detected:
-        return detected
-
-    if command_name in ("ffmpeg", "ffprobe"):
-        winget_pattern = str(
-            Path.home()
-            / "AppData"
-            / "Local"
-            / "Microsoft"
-            / "WinGet"
-            / "Packages"
-            / "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-            / "ffmpeg-*"
-            / "bin"
-            / f"{command_name}.exe"
-        )
-        candidates = sorted(glob.glob(winget_pattern), reverse=True)
-        if candidates:
-            return candidates[0]
-
-    return None
+def _video_job_payload(job):
+    return {
+        "id": job.id,
+        "lesson_id": job.lesson_id,
+        "status": job.status,
+        "progress_percent": int(job.progress_percent),
+        "attempt_count": int(job.attempt_count),
+        "max_attempts": int(job.max_attempts),
+        "error_message": job.error_message,
+        "output_hls_master_path": job.output_hls_master_path,
+        "output_duration_seconds": job.output_duration_seconds,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
 
 
 def _active_session_for_token(payload, lesson_id):
@@ -461,7 +540,54 @@ def _active_session_for_token(payload, lesson_id):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+def auth_login(request):
+    ip_key = f"ip:{_safe_subject(_client_ip(request))}"
+    username_raw = str(request.data.get("username", "")).strip()
+    username_key = f"user:{_safe_subject(username_raw)}"
+
+    ok, retry_after = _rate_limit_hit(
+        scope="auth_login_ip",
+        subject_key=ip_key,
+        limit=int(getattr(settings, "AUTH_LOGIN_IP_RATE_LIMIT", 25)),
+        window_seconds=int(getattr(settings, "AUTH_LOGIN_IP_RATE_WINDOW_SECONDS", 300)),
+        lock_seconds=int(getattr(settings, "AUTH_LOGIN_IP_RATE_LOCK_SECONDS", 900)),
+    )
+    if not ok:
+        return _rate_limit_response("Too many login attempts from this network. Try again later.", retry_after)
+
+    ok, retry_after = _rate_limit_hit(
+        scope="auth_login_user",
+        subject_key=username_key,
+        limit=int(getattr(settings, "AUTH_LOGIN_USER_RATE_LIMIT", 8)),
+        window_seconds=int(getattr(settings, "AUTH_LOGIN_USER_RATE_WINDOW_SECONDS", 300)),
+        lock_seconds=int(getattr(settings, "AUTH_LOGIN_USER_RATE_LOCK_SECONDS", 900)),
+    )
+    if not ok:
+        return _rate_limit_response("Too many login attempts for this account. Try again later.", retry_after)
+
+    serializer = TokenObtainPairSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response({"detail": "Username or password is incorrect."}, status=status.HTTP_401_UNAUTHORIZED)
+
+    _rate_limit_reset(scope="auth_login_user", subject_key=username_key)
+    data = serializer.validated_data
+    return Response({"refresh": data["refresh"], "access": data["access"]}, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
 def register(request):
+    ip_key = f"ip:{_safe_subject(_client_ip(request))}"
+    ok, retry_after = _rate_limit_hit(
+        scope="auth_register_ip",
+        subject_key=ip_key,
+        limit=int(getattr(settings, "AUTH_REGISTER_IP_RATE_LIMIT", 10)),
+        window_seconds=int(getattr(settings, "AUTH_REGISTER_IP_RATE_WINDOW_SECONDS", 3600)),
+        lock_seconds=int(getattr(settings, "AUTH_REGISTER_IP_RATE_LOCK_SECONDS", 3600)),
+    )
+    if not ok:
+        return _rate_limit_response("Too many registration attempts. Try again later.", retry_after)
+
     serializer = RegisterSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
@@ -587,7 +713,7 @@ def logout(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def course_list(_request):
-    courses = Course.objects.filter(is_published=True).order_by("id")
+    courses = [course for course in Course.objects.all().order_by("id") if _is_course_live(course)]
     return Response(CourseListSerializer(courses, many=True).data)
 
 
@@ -597,10 +723,11 @@ def course_detail(request, course_slug):
     course = get_object_or_404(
         Course.objects.prefetch_related("lessons"),
         slug=course_slug,
-        is_published=True,
     )
+    _assert_course_live(course)
     is_enrolled = _is_enrolled(request.user, course)
     unlocked_ids = _unlocked_lesson_ids(request.user, course)
+    free_ids = _free_lesson_ids(course)
     quiz_status_by_lesson = {}
     if request.user.is_authenticated and is_enrolled:
         attempts = QuizAttempt.objects.filter(user=request.user, lesson__course=course).values("lesson_id", "passed")
@@ -615,6 +742,7 @@ def course_detail(request, course_slug):
         context={
             "is_enrolled": is_enrolled,
             "unlocked_lesson_ids": unlocked_ids,
+            "free_lesson_ids": free_ids,
             "quiz_status_by_lesson": quiz_status_by_lesson,
         },
     )
@@ -626,11 +754,17 @@ def course_detail(request, course_slug):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def course_lessons(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     is_enrolled = _is_enrolled(request.user, course)
     unlocked_ids = _unlocked_lesson_ids(request.user, course)
+    free_ids = _free_lesson_ids(course)
     lessons = Lesson.objects.filter(course=course).order_by("section_order", "order", "id")
-    serializer = LessonAccessSerializer(lessons, many=True, context={"is_enrolled": is_enrolled, "unlocked_lesson_ids": unlocked_ids})
+    serializer = LessonAccessSerializer(
+        lessons,
+        many=True,
+        context={"is_enrolled": is_enrolled, "unlocked_lesson_ids": unlocked_ids, "free_lesson_ids": free_ids},
+    )
     return Response(
         {
             "course_id": course.id,
@@ -643,7 +777,8 @@ def course_lessons(request, course_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def enroll_course(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     with transaction.atomic():
         wallet, _ = CreditWallet.objects.get_or_create(user=request.user, defaults={"balance_credits": 0})
         wallet = CreditWallet.objects.select_for_update().get(id=wallet.id)
@@ -725,7 +860,8 @@ def my_wallet(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def course_exam_eligibility(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -876,7 +1012,8 @@ def admin_final_exam_question_detail(request, question_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def course_final_exam(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -899,6 +1036,18 @@ def course_final_exam(request, course_id):
     failed_attempts = FinalExamAttempt.objects.filter(user=request.user, exam=exam, passed=False).count()
     retry_fee_required = failed_attempts >= 3
     wallet = _wallet_for_user(request.user)
+    if retry_fee_required and wallet.balance_credits < retry_fee_credits:
+        return Response(
+            {
+                "detail": "Insufficient credits for final exam retry fee.",
+                "required_credits": retry_fee_credits,
+                "current_credits": wallet.balance_credits,
+                "failed_attempts": failed_attempts,
+                "retry_fee_required": True,
+                "retry_fee_locked": True,
+            },
+            status=status.HTTP_402_PAYMENT_REQUIRED,
+        )
 
     question_lookup = {question.id: question for question in questions}
     payload_questions = []
@@ -946,7 +1095,19 @@ def course_final_exam(request, course_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def submit_course_final_exam(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    user_key = f"user:{request.user.id}:course:{course_id}"
+    ok, retry_after = _rate_limit_hit(
+        scope="exam_submit",
+        subject_key=user_key,
+        limit=int(getattr(settings, "EXAM_SUBMIT_RATE_LIMIT", 30)),
+        window_seconds=int(getattr(settings, "EXAM_SUBMIT_RATE_WINDOW_SECONDS", 600)),
+        lock_seconds=int(getattr(settings, "EXAM_SUBMIT_RATE_LOCK_SECONDS", 1800)),
+    )
+    if not ok:
+        return _rate_limit_response("Final exam is temporarily locked due to too many submissions.", retry_after)
+
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -1069,7 +1230,8 @@ def submit_course_final_exam(request, course_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def course_final_exam_attempts(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
     exam = FinalExam.objects.filter(course=course, is_published=True).first()
@@ -1082,7 +1244,8 @@ def course_final_exam_attempts(request, course_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_course_certificate(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
     certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
@@ -1094,7 +1257,8 @@ def my_course_certificate(request, course_id):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def course_access(request, course_id):
-    course = get_object_or_404(Course, id=course_id, is_published=True)
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
     return Response({"course_id": course.id, "enrolled": _is_enrolled(request.user, course)})
 
 
@@ -1168,7 +1332,7 @@ def admin_lessons(request):
         title=data["title"],
         order=data["order"],
         content_type=data.get("content_type", Lesson.ContentType.VIDEO),
-        is_preview=data.get("is_preview", False),
+        is_preview=False,
         hls_master_path=data.get("hls_master_path", ""),
         reading_content=data.get("reading_content", ""),
         duration_seconds=data.get("duration_seconds"),
@@ -1283,88 +1447,60 @@ def admin_upload_video(request):
     serializer = AdminUploadVideoSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
-    ffmpeg_bin = _resolve_binary(settings.FFMPEG_BIN, "ffmpeg")
-    ffprobe_bin = _resolve_binary(settings.FFPROBE_BIN, "ffprobe")
-    if not ffmpeg_bin:
+    data = serializer.validated_data
+    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=data["lesson_id"])
+    video_file = data["video"]
+    upload_dir = Path(settings.MEDIA_ROOT) / "uploads" / f"course_{lesson.course_id}" / f"lesson_{lesson.id}"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{uuid.uuid4().hex}_{Path(video_file.name).name}"
+    source_path = upload_dir / safe_name
+    with source_path.open("wb") as f:
+        for chunk in video_file.chunks():
+            f.write(chunk)
+
+    job = VideoTranscodeJob.objects.create(
+        lesson=lesson,
+        uploaded_by=request.user,
+        source_file=str(source_path),
+        status=VideoTranscodeJob.Status.QUEUED,
+        progress_percent=5,
+        max_attempts=int(getattr(settings, "VIDEO_TRANSCODE_MAX_ATTEMPTS", 3)),
+    )
+
+    try:
+        from core.tasks import process_video_transcode_job
+
+        async_result = process_video_transcode_job.delay(job.id)
+        job.task_id = async_result.id or ""
+        job.save(update_fields=["task_id", "updated_at"])
+    except Exception as exc:
+        job.status = VideoTranscodeJob.Status.FAILED
+        job.error_message = f"Queue dispatch failed: {str(exc)[:800]}"
+        job.progress_percent = 0
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error_message", "progress_percent", "finished_at", "updated_at"])
         return Response(
             {
-                "detail": "ffmpeg not found. Set FFMPEG_BIN in backend/.env or install ffmpeg in PATH.",
-                "hint": "Example: FFMPEG_BIN=C:\\\\...\\\\ffmpeg.exe",
+                "detail": "Failed to queue transcoding job.",
+                "job": _video_job_payload(job),
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    data = serializer.validated_data
-    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=data["lesson_id"])
-    video_file = data["video"]
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        input_path = Path(temp_dir) / video_file.name
-        with input_path.open("wb") as f:
-            for chunk in video_file.chunks():
-                f.write(chunk)
-
-        output_dir = settings.MEDIA_ROOT / "hls" / f"course_{lesson.course_id}" / f"lesson_{lesson.id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        master_path = output_dir / "master.m3u8"
-        segment_pattern = str(output_dir / "seg_%03d.ts")
-
-        ffmpeg_cmd = [
-            ffmpeg_bin,
-            "-y",
-            "-i",
-            str(input_path),
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            "-hls_time",
-            "6",
-            "-hls_playlist_type",
-            "vod",
-            "-hls_segment_filename",
-            segment_pattern,
-            str(master_path),
-        ]
-        ffmpeg_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-        if ffmpeg_result.returncode != 0 or not master_path.exists():
-            return Response(
-                {"detail": "Video transcoding failed.", "stderr": ffmpeg_result.stderr[-1200:]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        duration_seconds = lesson.duration_seconds
-        if ffprobe_bin:
-            ffprobe_cmd = [
-                ffprobe_bin,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(input_path),
-            ]
-            ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True)
-            if ffprobe_result.returncode == 0:
-                try:
-                    duration_seconds = int(float(ffprobe_result.stdout.strip()))
-                except ValueError:
-                    pass
-
-    lesson.hls_master_path = f"media/hls/course_{lesson.course_id}/lesson_{lesson.id}/master.m3u8"
-    lesson.duration_seconds = duration_seconds
-    lesson.save(update_fields=["hls_master_path", "duration_seconds", "updated_at"])
-
     return Response(
         {
-            "lesson_id": lesson.id,
-            "course_id": lesson.course_id,
-            "hls_master_path": lesson.hls_master_path,
-            "duration_seconds": lesson.duration_seconds,
+            "detail": "Video received. Transcoding queued.",
+            "job": _video_job_payload(job),
         },
-        status=status.HTTP_200_OK,
+        status=status.HTTP_202_ACCEPTED,
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_upload_job_detail(request, job_id):
+    job = get_object_or_404(VideoTranscodeJob.objects.select_related("lesson"), id=job_id)
+    return Response(_video_job_payload(job))
 
 
 @api_view(["GET"])
@@ -1758,8 +1894,8 @@ def lesson_detail(request, lesson_id):
     lesson = get_object_or_404(
         Lesson.objects.select_related("course"),
         id=lesson_id,
-        course__is_published=True,
     )
+    _assert_course_live(lesson.course)
     if not _can_access_lesson(request.user, lesson):
         return Response(
             {"detail": _lesson_access_denial_message(request.user, lesson)},
@@ -1775,8 +1911,8 @@ def lesson_progress(request, lesson_id):
     lesson = get_object_or_404(
         Lesson.objects.select_related("course"),
         id=lesson_id,
-        course__is_published=True,
     )
+    _assert_course_live(lesson.course)
     if not _can_access_lesson(request.user, lesson):
         return Response(
             {"detail": _lesson_access_denial_message(request.user, lesson)},
@@ -1824,8 +1960,8 @@ def stream_access(request, lesson_id):
     lesson = get_object_or_404(
         Lesson.objects.select_related("course"),
         id=lesson_id,
-        course__is_published=True,
     )
+    _assert_course_live(lesson.course)
     if not _can_access_lesson(request.user, lesson):
         return Response(
             {"detail": _lesson_access_denial_message(request.user, lesson)},
@@ -2015,7 +2151,8 @@ def stream_hls_asset(request, lesson_id, asset_name):
     except PermissionError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
 
-    lesson = get_object_or_404(Lesson, id=lesson_id, course__is_published=True)
+    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=lesson_id)
+    _assert_course_live(lesson.course)
     try:
         path = _lesson_asset_path(lesson, asset_name)
     except SuspiciousFileOperation:
@@ -2048,8 +2185,8 @@ def lesson_quiz(request, lesson_id):
     lesson = get_object_or_404(
         Lesson.objects.select_related("course"),
         id=lesson_id,
-        course__is_published=True,
     )
+    _assert_course_live(lesson.course)
     if not _is_enrolled(request.user, lesson.course):
         return Response(
             {"detail": "Enrollment required for quizzes."},
@@ -2065,22 +2202,45 @@ def lesson_quiz(request, lesson_id):
     questions = quiz.get("questions", [])
     if not questions:
         return Response({"detail": "Quiz not found for this lesson."}, status=status.HTTP_404_NOT_FOUND)
+    pool_size = min(5, len(questions))
+    sampled_questions = random.sample(questions, pool_size) if len(questions) > pool_size else list(questions)
+    random.shuffle(sampled_questions)
+
+    question_ids = []
+    choice_map = {}
+    rendered_questions = []
+    for idx, q in enumerate(sampled_questions, start=1):
+        qid = int(q["id"])
+        shuffled_choices = list(q.get("choices", []))
+        random.shuffle(shuffled_choices)
+        question_ids.append(qid)
+        choice_map[str(qid)] = [int(c["id"]) for c in shuffled_choices]
+        rendered_questions.append(
+            {
+                "id": qid,
+                "prompt": q["prompt"],
+                "type": q.get("type", "MCQ"),
+                "order": idx,
+                "choices": [{"id": c["id"], "text": c["text"]} for c in shuffled_choices],
+            }
+        )
+
+    session_token = _issue_quiz_session_token(
+        user_id=request.user.id,
+        lesson_id=lesson.id,
+        question_ids=question_ids,
+        choice_map=choice_map,
+    )
+
     return Response(
         {
             "id": lesson.id,
             "lesson_id": lesson.id,
             "passing_score": quiz.get("passing_score", 70),
             "time_limit_sec": quiz.get("time_limit_sec"),
-            "questions": [
-                {
-                    "id": q["id"],
-                    "prompt": q["prompt"],
-                    "type": q.get("type", "MCQ"),
-                    "order": q.get("order", idx + 1),
-                    "choices": [{"id": c["id"], "text": c["text"]} for c in q.get("choices", [])],
-                }
-                for idx, q in enumerate(questions)
-            ],
+            "pool_size": pool_size,
+            "session_token": session_token,
+            "questions": rendered_questions,
         }
     )
 
@@ -2088,11 +2248,22 @@ def lesson_quiz(request, lesson_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quiz_submit(request, quiz_id):
+    user_key = f"user:{request.user.id}:quiz:{quiz_id}"
+    ok, retry_after = _rate_limit_hit(
+        scope="quiz_submit",
+        subject_key=user_key,
+        limit=int(getattr(settings, "QUIZ_SUBMIT_RATE_LIMIT", 50)),
+        window_seconds=int(getattr(settings, "QUIZ_SUBMIT_RATE_WINDOW_SECONDS", 600)),
+        lock_seconds=int(getattr(settings, "QUIZ_SUBMIT_RATE_LOCK_SECONDS", 900)),
+    )
+    if not ok:
+        return _rate_limit_response("Quiz is temporarily locked due to too many submissions.", retry_after)
+
     lesson = get_object_or_404(
         Lesson.objects.select_related("course"),
         id=quiz_id,
-        course__is_published=True,
     )
+    _assert_course_live(lesson.course)
     quiz = get_quiz_payload(lesson)
     questions = quiz.get("questions", [])
     if not questions:
@@ -2136,9 +2307,34 @@ def quiz_submit(request, quiz_id):
 
     serializer = QuizSubmitSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
+    session_token = (serializer.validated_data.get("session_token") or "").strip()
     submitted_answers = serializer.validated_data["answers"]
 
-    question_map = {int(q["id"]): q for q in questions}
+    full_question_map = {int(q["id"]): q for q in questions}
+    active_questions = questions
+    allowed_choice_map = {int(q["id"]): {int(c["id"]) for c in q.get("choices", [])} for q in questions}
+
+    # If provided, quiz session token enforces randomized question pool + choice set.
+    if session_token:
+        try:
+            token_payload = _decode_quiz_session_token(session_token)
+        except signing.BadSignature:
+            return Response({"detail": "Quiz session expired or invalid. Please reload quiz."}, status=status.HTTP_400_BAD_REQUEST)
+        if int(token_payload.get("uid", 0)) != int(request.user.id) or int(token_payload.get("lid", 0)) != int(lesson.id):
+            return Response({"detail": "Quiz session does not match this user/lesson."}, status=status.HTTP_400_BAD_REQUEST)
+        token_qids = [int(qid) for qid in token_payload.get("qids", [])]
+        token_cm = token_payload.get("cm", {}) if isinstance(token_payload.get("cm", {}), dict) else {}
+        active_questions = [full_question_map[qid] for qid in token_qids if qid in full_question_map]
+        if not active_questions:
+            return Response({"detail": "Quiz session has no active questions. Please reload quiz."}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_choice_map = {}
+        for question in active_questions:
+            qid = int(question["id"])
+            source_choice_ids = {int(c["id"]) for c in question.get("choices", [])}
+            token_choice_ids = [int(cid) for cid in token_cm.get(str(qid), []) if int(cid) in source_choice_ids]
+            allowed_choice_map[qid] = set(token_choice_ids if token_choice_ids else source_choice_ids)
+
+    question_map = {int(q["id"]): q for q in active_questions}
     seen_questions = set()
     normalized_answers = []
     correct_count = 0
@@ -2160,6 +2356,11 @@ def quiz_submit(request, quiz_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if int(cid) not in allowed_choice_map.get(int(qid), set()):
+            return Response(
+                {"detail": f"Choice {cid} is invalid for question {qid}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         choice = next((c for c in question.get("choices", []) if int(c["id"]) == int(cid)), None)
         if choice is None:
             return Response(
@@ -2171,7 +2372,7 @@ def quiz_submit(request, quiz_id):
             correct_count += 1
         normalized_answers.append({"question_id": int(qid), "choice_id": int(cid)})
 
-    total_questions = len(questions)
+    total_questions = len(active_questions)
     score = round((correct_count / total_questions) * 100, 2)
     passed = score >= float(quiz.get("passing_score", 70))
 
@@ -2207,7 +2408,8 @@ def quiz_submit(request, quiz_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def quiz_attempts(request, quiz_id):
-    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=quiz_id, course__is_published=True)
+    lesson = get_object_or_404(Lesson.objects.select_related("course"), id=quiz_id)
+    _assert_course_live(lesson.course)
     if not _is_enrolled(request.user, lesson.course):
         return Response(
             {"detail": "Enrollment required for quizzes."},

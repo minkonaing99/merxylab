@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
@@ -15,6 +15,8 @@ type Course = {
   level: string;
   price_cents?: number;
   is_published: boolean;
+  publish_at?: string | null;
+  unpublish_at?: string | null;
   enrollment_count?: number;
 };
 
@@ -27,7 +29,6 @@ type Lesson = {
   course_id: number;
   section_id: number;
   section_title: string;
-  is_preview: boolean;
   hls_master_path?: string;
   reading_content?: string;
 };
@@ -101,6 +102,15 @@ type FinalExamPayload = {
     choices: Array<{ id: number; text: string; order: number; is_correct?: boolean }>;
   }>;
 };
+type UploadJob = {
+  id: number;
+  lesson_id: number;
+  status: "QUEUED" | "PROCESSING" | "RETRYING" | "COMPLETED" | "FAILED";
+  progress_percent: number;
+  attempt_count: number;
+  max_attempts: number;
+  error_message?: string;
+};
 
 type FeedbackTarget =
   | "global"
@@ -117,6 +127,13 @@ type FeedbackTarget =
 type AdminView = "build" | "manage" | "insights";
 const COURSE_LEVEL_OPTIONS = ["Beginner", "Intermediate", "Advanced"] as const;
 const NEW_COURSE_SELECTOR_VALUE = "__new__";
+const toDateTimeLocalValue = (iso?: string | null) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const toIsoFromDateTimeLocal = (value: string) => (value ? new Date(value).toISOString() : null);
 const FINAL_EXAM_JSON_SAMPLE = `[
   {
     "question": "What happens if you call pop() on an empty list?",
@@ -167,6 +184,8 @@ export default function AdminUiPage() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "processing">("idle");
+  const [uploadJob, setUploadJob] = useState<UploadJob | null>(null);
+  const uploadPollingCancelledRef = useRef(false);
   const [dragOver, setDragOver] = useState(false);
   const [courseEnrollments, setCourseEnrollments] = useState<EnrollmentRow[]>([]);
   const [showEnrollmentsForCourseId, setShowEnrollmentsForCourseId] = useState<number | null>(null);
@@ -178,6 +197,8 @@ export default function AdminUiPage() {
     level: "Beginner",
     price_cents: 0,
     is_published: true,
+    publish_at: "",
+    unpublish_at: "",
   });
 
   const [lessonForm, setLessonForm] = useState({
@@ -187,7 +208,6 @@ export default function AdminUiPage() {
     title: "",
     order: 1,
     content_type: "VIDEO" as "VIDEO" | "READING",
-    is_preview: false,
     reading_content: "",
   });
 
@@ -213,13 +233,14 @@ export default function AdminUiPage() {
     description: "",
     price_cents: 0,
     is_published: false,
+    publish_at: "",
+    unpublish_at: "",
   });
   const [editLessonForm, setEditLessonForm] = useState({
     id: "",
     title: "",
     order: 1,
     content_type: "VIDEO" as "VIDEO" | "READING",
-    is_preview: false,
     reading_content: "",
   });
   const [editQuizForm, setEditQuizForm] = useState({
@@ -249,6 +270,12 @@ export default function AdminUiPage() {
 
   useEffect(() => {
     setTheme("light");
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      uploadPollingCancelledRef.current = true;
+    };
   }, []);
 
   const selectedCourseSections = useMemo(
@@ -492,12 +519,28 @@ export default function AdminUiPage() {
       async () => {
         const created = await apiFetch<Course>(
           "/admin/courses/",
-          { method: "POST", body: JSON.stringify(courseForm) },
+          {
+            method: "POST",
+            body: JSON.stringify({
+              ...courseForm,
+              publish_at: toIsoFromDateTimeLocal(courseForm.publish_at),
+              unpublish_at: toIsoFromDateTimeLocal(courseForm.unpublish_at),
+            }),
+          },
           accessToken,
         );
         setSelectedCourseId(created.id);
         setIsCreatingNewCourse(false);
-        setCourseForm({ title: "", slug: "", description: "", level: "Beginner", price_cents: 0, is_published: true });
+        setCourseForm({
+          title: "",
+          slug: "",
+          description: "",
+          level: "Beginner",
+          price_cents: 0,
+          is_published: true,
+          publish_at: "",
+          unpublish_at: "",
+        });
       },
       "Course created. Continue with Step 2.",
       "step1-course",
@@ -514,7 +557,6 @@ export default function AdminUiPage() {
           title: lessonForm.title,
           order: lessonForm.order,
           content_type: lessonForm.content_type,
-          is_preview: lessonForm.is_preview,
           reading_content: lessonForm.content_type === "READING" ? lessonForm.reading_content : "",
         };
         if (lessonForm.section_id) {
@@ -533,7 +575,6 @@ export default function AdminUiPage() {
           title: "",
           order: lessonForm.order + 1,
           content_type: "VIDEO",
-          is_preview: false,
           reading_content: "",
         });
       },
@@ -549,8 +590,9 @@ export default function AdminUiPage() {
     setFeedback(null);
     setUploadProgress(0);
     setUploadPhase("uploading");
+    uploadPollingCancelledRef.current = false;
     try {
-      await new Promise<void>((resolve, reject) => {
+      const job = await new Promise<UploadJob>((resolve, reject) => {
         const formData = new FormData();
         formData.append("lesson_id", String(selectedLessonIdForVideo));
         formData.append("video", videoFile);
@@ -569,8 +611,16 @@ export default function AdminUiPage() {
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
             setUploadProgress(100);
-            setUploadPhase("idle");
-            resolve();
+            try {
+              const payload = JSON.parse(xhr.responseText) as { job?: UploadJob };
+              if (payload.job) {
+                resolve(payload.job);
+                return;
+              }
+            } catch {
+              // fall through to generic error below
+            }
+            reject(new Error("Queue response is invalid."));
             return;
           }
           try {
@@ -585,16 +635,68 @@ export default function AdminUiPage() {
       });
 
       setVideoFile(null);
-      setFeedback({ target: "step3-upload", type: "success", message: "Video uploaded and converted to HLS." });
-      await loadData();
+      setUploadPhase("processing");
+      setUploadJob(job);
+      setFeedback({ target: "step3-upload", type: "success", message: "Video uploaded. Transcoding queued in background." });
+
+      const pollJob = async () => {
+        if (!accessToken) return;
+        const maxPolls = 400;
+        for (let i = 0; i < maxPolls; i += 1) {
+          if (uploadPollingCancelledRef.current) return;
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+          if (uploadPollingCancelledRef.current) return;
+          try {
+            const latest = await apiFetch<UploadJob>(`/admin/upload-jobs/${job.id}/`, {}, accessToken);
+            if (uploadPollingCancelledRef.current) return;
+            setUploadJob(latest);
+            setUploadProgress(Math.max(5, Math.min(100, latest.progress_percent || 0)));
+
+            if (latest.status === "COMPLETED") {
+              setUploadPhase("idle");
+              setUploadProgress(100);
+              setUploadJob(null);
+              setFeedback({ target: "step3-upload", type: "success", message: "Video transcoding completed." });
+              await loadData();
+              window.setTimeout(() => setUploadProgress(0), 1200);
+              return;
+            }
+            if (latest.status === "FAILED") {
+              setUploadPhase("idle");
+              setUploadJob(null);
+              setFeedback({
+                target: "step3-upload",
+                type: "error",
+                message: latest.error_message || "Video transcoding failed after retries.",
+              });
+              return;
+            }
+          } catch (err) {
+            setUploadPhase("idle");
+            setUploadJob(null);
+            setFeedback({
+              target: "step3-upload",
+              type: "error",
+              message: err instanceof ApiError ? err.message : "Failed to check transcoding status.",
+            });
+            return;
+          }
+        }
+        setUploadPhase("idle");
+        setUploadJob(null);
+        setFeedback({
+          target: "step3-upload",
+          type: "error",
+          message: "Transcoding is taking too long. Check job status again in a moment.",
+        });
+      };
+      void pollJob();
     } catch (err) {
       setFeedback({ target: "step3-upload", type: "error", message: err instanceof Error ? err.message : "Video upload failed." });
+      setUploadPhase("idle");
+      setUploadJob(null);
     } finally {
       setLoading(false);
-      window.setTimeout(() => {
-        setUploadProgress(0);
-        setUploadPhase("idle");
-      }, 1200);
     }
   };
 
@@ -729,6 +831,8 @@ export default function AdminUiPage() {
               description: editCourseForm.description,
               price_cents: editCourseForm.price_cents,
               is_published: editCourseForm.is_published,
+              publish_at: toIsoFromDateTimeLocal(editCourseForm.publish_at),
+              unpublish_at: toIsoFromDateTimeLocal(editCourseForm.unpublish_at),
             }),
           },
           accessToken,
@@ -745,7 +849,17 @@ export default function AdminUiPage() {
     await runAction(
       async () => {
         await apiFetch(`/admin/courses/${editCourseForm.id}/`, { method: "DELETE" }, accessToken);
-        setEditCourseForm({ id: "", title: "", slug: "", level: "", description: "", price_cents: 0, is_published: false });
+        setEditCourseForm({
+          id: "",
+          title: "",
+          slug: "",
+          level: "",
+          description: "",
+          price_cents: 0,
+          is_published: false,
+          publish_at: "",
+          unpublish_at: "",
+        });
       },
       "Course deleted.",
       "manage-course",
@@ -765,7 +879,6 @@ export default function AdminUiPage() {
               title: editLessonForm.title,
               order: editLessonForm.order,
               content_type: editLessonForm.content_type,
-              is_preview: editLessonForm.is_preview,
               reading_content: editLessonForm.content_type === "READING" ? editLessonForm.reading_content : "",
             }),
           },
@@ -783,7 +896,7 @@ export default function AdminUiPage() {
     await runAction(
       async () => {
         await apiFetch(`/admin/lessons/${editLessonForm.id}/`, { method: "DELETE" }, accessToken);
-        setEditLessonForm({ id: "", title: "", order: 1, content_type: "VIDEO", is_preview: false, reading_content: "" });
+        setEditLessonForm({ id: "", title: "", order: 1, content_type: "VIDEO", reading_content: "" });
       },
       "Lesson deleted.",
       "manage-lesson",
@@ -1265,6 +1378,20 @@ export default function AdminUiPage() {
               }
             />
             <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
+            <label className="mt-2 block text-xs text-slate-600">Schedule publish (optional)</label>
+            <input
+              type="datetime-local"
+              className="mt-1 w-full rounded border px-3 py-2"
+              value={courseForm.publish_at}
+              onChange={(e) => setCourseForm((v) => ({ ...v, publish_at: e.target.value }))}
+            />
+            <label className="mt-2 block text-xs text-slate-600">Schedule unpublish (optional)</label>
+            <input
+              type="datetime-local"
+              className="mt-1 w-full rounded border px-3 py-2"
+              value={courseForm.unpublish_at}
+              onChange={(e) => setCourseForm((v) => ({ ...v, unpublish_at: e.target.value }))}
+            />
             <label className="mt-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
               Publish immediately
@@ -1319,10 +1446,7 @@ export default function AdminUiPage() {
               Reading editor moved to Step 3. Save this lesson, then use Step 3 to write formatted reading content.
             </p>
           )}
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={lessonForm.is_preview} onChange={(e) => setLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
-            Preview lesson (free without enrollment)
-          </label>
+          <p className="mt-2 text-xs text-slate-500">First 2 lessons are automatically free to view without enrollment.</p>
           <button disabled={loading || selectedCourseId == null} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60">Save Lesson</button>
           {renderFeedback("step2-lesson")}
         </form>
@@ -1400,28 +1524,39 @@ export default function AdminUiPage() {
                 <p className="mt-1 text-xs text-slate-500">Supported: mp4, mov, mkv, webm</p>
                 {videoFile && <p className="mt-2 text-xs text-emerald-700">Selected: {videoFile.name}</p>}
               </label>
-              <button disabled={loading || !videoFile || !selectedLessonIdForVideo} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
-                {loading ? "Processing..." : "Upload & Convert"}
+              <button disabled={loading || !videoFile || !selectedLessonIdForVideo || Boolean(uploadJob)} className="mt-3 rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-60">
+                {loading ? "Uploading..." : uploadJob ? "Transcoding..." : "Upload & Convert"}
               </button>
             </>
           ) : (
             <p className="mt-3 text-sm text-slate-500">Select a lesson to continue.</p>
           )}
-          {(uploadProgress > 0 || (loading && Boolean(videoFile) && selectedStep3Lesson?.content_type === "VIDEO")) && (
+          {(uploadProgress > 0 || uploadPhase !== "idle" || Boolean(uploadJob)) && (
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
                 <span>
-                  {uploadPhase === "processing" ? "Processing video" : "Upload progress"}
+                  {uploadPhase === "uploading"
+                    ? "Upload progress"
+                    : uploadJob?.status === "QUEUED"
+                      ? "Queued for processing"
+                      : uploadJob?.status === "RETRYING"
+                        ? "Retrying transcoding"
+                        : "Processing video"}
                 </span>
-                <span>{uploadPhase === "processing" ? "Please wait..." : `${uploadProgress}%`}</span>
+                <span>{uploadPhase === "uploading" ? `${uploadProgress}%` : `${uploadProgress}%`}</span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                {uploadPhase === "processing" ? (
-                  <div className="h-full w-1/3 animate-pulse bg-amber-600" />
+                {uploadPhase !== "uploading" && (!uploadJob || uploadJob.status !== "COMPLETED") ? (
+                  <div className={`h-full w-1/3 animate-pulse ${uploadJob?.status === "RETRYING" ? "bg-amber-600" : "bg-blue-600"}`} />
                 ) : (
                   <div className="h-full bg-emerald-600 transition-all" style={{ width: `${uploadProgress}%` }} />
                 )}
               </div>
+              {uploadJob && (
+                <p className="mt-1 text-xs text-slate-500">
+                  Status: {uploadJob.status} | Attempt {uploadJob.attempt_count}/{uploadJob.max_attempts}
+                </p>
+              )}
             </div>
           )}
           {renderFeedback("step3-upload")}
@@ -1650,6 +1785,8 @@ export default function AdminUiPage() {
                 description: course.description,
                 price_cents: course.price_cents ?? 0,
                 is_published: Boolean(course.is_published),
+                publish_at: toDateTimeLocalValue(course.publish_at),
+                unpublish_at: toDateTimeLocalValue(course.unpublish_at),
               });
             }}
           >
@@ -1674,6 +1811,20 @@ export default function AdminUiPage() {
                 </select>
                 <input type="number" min={0} className="w-full rounded border px-3 py-2" value={editCourseForm.price_cents} onChange={(e) => setEditCourseForm((v) => ({ ...v, price_cents: Number(e.target.value) }))} placeholder="Required credits to enroll" />
                 <textarea className="w-full rounded border px-3 py-2" value={editCourseForm.description} onChange={(e) => setEditCourseForm((v) => ({ ...v, description: e.target.value }))} />
+                <label className="block text-xs text-slate-600">Schedule publish (optional)</label>
+                <input
+                  type="datetime-local"
+                  className="w-full rounded border px-3 py-2"
+                  value={editCourseForm.publish_at}
+                  onChange={(e) => setEditCourseForm((v) => ({ ...v, publish_at: e.target.value }))}
+                />
+                <label className="block text-xs text-slate-600">Schedule unpublish (optional)</label>
+                <input
+                  type="datetime-local"
+                  className="w-full rounded border px-3 py-2"
+                  value={editCourseForm.unpublish_at}
+                  onChange={(e) => setEditCourseForm((v) => ({ ...v, unpublish_at: e.target.value }))}
+                />
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={editCourseForm.is_published} onChange={(e) => setEditCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
                   Published
@@ -1722,7 +1873,6 @@ export default function AdminUiPage() {
                 title: lesson.title,
                 order: lesson.order ?? 1,
                 content_type: lesson.content_type,
-                is_preview: lesson.is_preview,
                 reading_content: lesson.reading_content || "",
               });
               if (lesson.content_type === "VIDEO") {
@@ -1754,10 +1904,7 @@ export default function AdminUiPage() {
                     <textarea className="w-full rounded border px-3 py-2 font-mono text-sm" value={editLessonForm.reading_content} onChange={(e) => setEditLessonForm((v) => ({ ...v, reading_content: e.target.value }))} />
                   </>
                 )}
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={editLessonForm.is_preview} onChange={(e) => setEditLessonForm((v) => ({ ...v, is_preview: e.target.checked }))} />
-                  Preview
-                </label>
+                <p className="text-xs text-slate-500">Public preview is automatic for the first 2 lessons in each course.</p>
                 <div className="flex gap-2">
                   <button className="rounded bg-slate-900 px-3 py-2 text-sm text-white" type="submit">Save Lesson</button>
                   <button className="rounded bg-red-700 px-3 py-2 text-sm text-white" type="button" onClick={deleteLesson}>Delete Lesson</button>

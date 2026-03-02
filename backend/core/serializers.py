@@ -42,7 +42,8 @@ class LessonAccessSerializer(serializers.ModelSerializer):
         ]
 
     def get_locked(self, obj):
-        if obj.is_preview:
+        free_lesson_ids = self.context.get("free_lesson_ids", set())
+        if obj.id in free_lesson_ids:
             return False
         unlocked_ids = self.context.get("unlocked_lesson_ids", set())
         return obj.id not in unlocked_ids
@@ -70,6 +71,8 @@ class CourseListSerializer(serializers.ModelSerializer):
             "price_cents",
             "thumbnail_url",
             "is_published",
+            "publish_at",
+            "unpublish_at",
         ]
 
 
@@ -102,7 +105,11 @@ class CourseDetailSerializer(CourseListSerializer):
             grouped[key]["lessons"].append(
                 LessonAccessSerializer(
                     lesson,
-                    context={"unlocked_lesson_ids": unlocked_ids, "quiz_status_by_lesson": quiz_status_map},
+                    context={
+                        "unlocked_lesson_ids": unlocked_ids,
+                        "quiz_status_by_lesson": quiz_status_map,
+                        "free_lesson_ids": self.context.get("free_lesson_ids", set()),
+                    },
                 ).data
             )
 
@@ -255,6 +262,7 @@ class QuizSubmitAnswerSerializer(serializers.Serializer):
 
 
 class QuizSubmitSerializer(serializers.Serializer):
+    session_token = serializers.CharField(required=False, allow_blank=True)
     answers = QuizSubmitAnswerSerializer(many=True, allow_empty=True)
 
 
@@ -281,6 +289,13 @@ class AdminSectionSerializer(serializers.Serializer):
 
 
 class AdminCourseCreateSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        publish_at = attrs.get("publish_at")
+        unpublish_at = attrs.get("unpublish_at")
+        if publish_at and unpublish_at and publish_at >= unpublish_at:
+            raise serializers.ValidationError("unpublish_at must be later than publish_at.")
+        return attrs
+
     class Meta:
         model = Course
         fields = [
@@ -292,10 +307,19 @@ class AdminCourseCreateSerializer(serializers.ModelSerializer):
             "price_cents",
             "thumbnail_url",
             "is_published",
+            "publish_at",
+            "unpublish_at",
         ]
 
 
 class AdminCourseUpdateSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        publish_at = attrs.get("publish_at", getattr(self.instance, "publish_at", None))
+        unpublish_at = attrs.get("unpublish_at", getattr(self.instance, "unpublish_at", None))
+        if publish_at and unpublish_at and publish_at >= unpublish_at:
+            raise serializers.ValidationError("unpublish_at must be later than publish_at.")
+        return attrs
+
     class Meta:
         model = Course
         fields = [
@@ -306,6 +330,8 @@ class AdminCourseUpdateSerializer(serializers.ModelSerializer):
             "price_cents",
             "thumbnail_url",
             "is_published",
+            "publish_at",
+            "unpublish_at",
         ]
 
 

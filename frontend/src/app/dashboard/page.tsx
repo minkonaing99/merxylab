@@ -23,6 +23,9 @@ type Enrollment = {
     slug: string;
     title: string;
     description: string;
+    is_published: boolean;
+    publish_at?: string | null;
+    unpublish_at?: string | null;
   };
   status: string;
 };
@@ -71,6 +74,11 @@ export default function DashboardPage() {
   >({});
   const [enrollingCourseId, setEnrollingCourseId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [isHydrated, setIsHydrated] = useState(false);
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   const loadData = useCallback(async (token: string) => {
     const [meData, enrollData, catalogData] = await Promise.all([
@@ -144,7 +152,12 @@ export default function DashboardPage() {
     }
   };
 
-  if (!accessToken && !getAccessToken()) {
+  if (!isHydrated) {
+    return <main className="page-wrap">Loading...</main>;
+  }
+
+  const token = accessToken || getAccessToken();
+  if (!token) {
     return <main className="page-wrap">Redirecting to login...</main>;
   }
 
@@ -179,13 +192,41 @@ export default function DashboardPage() {
                 const isComplete = (progress?.completion_rate ?? 0) >= 100;
                 const canTakeExam = isComplete && Boolean(progress?.final_exam_exists) && Boolean(progress?.can_take_final_exam);
                 const examPassed = Boolean(progress?.final_exam_passed);
+                const now = Date.now();
+                const publishAtMs = entry.course.publish_at ? new Date(entry.course.publish_at).getTime() : null;
+                const unpublishAtMs = entry.course.unpublish_at ? new Date(entry.course.unpublish_at).getTime() : null;
+                const isCourseAvailable =
+                  entry.course.is_published &&
+                  (publishAtMs === null || now >= publishAtMs) &&
+                  (unpublishAtMs === null || now < unpublishAtMs);
+                const publishAtText = publishAtMs
+                  ? new Intl.DateTimeFormat(undefined, {
+                    year: "numeric",
+                    month: "numeric",
+                    day: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  }).format(new Date(publishAtMs))
+                  : "";
+                const unavailableReason = !entry.course.is_published
+                  ? "Unpublished for now."
+                  : publishAtMs !== null && now < publishAtMs
+                    ? `Scheduled to publish on ${publishAtText}.`
+                    : unpublishAtMs !== null && now >= unpublishAtMs
+                      ? "Unpublished for now."
+                      : "";
                 return (
                   <>
-              <p className="text-xs uppercase tracking-wide muted">
-                    {isComplete ? "COMPLETE" : entry.status}
-              </p>
+                    <p className="text-xs uppercase tracking-wide muted">
+                      {!isCourseAvailable ? "UNAVAILABLE" : isComplete ? "COMPLETE" : entry.status}
+                    </p>
               <h3 className="mt-1 text-lg font-semibold">{entry.course.title}</h3>
               <p className="mt-2 text-sm muted">{entry.course.description}</p>
+                    {!isCourseAvailable && (
+                      <p className="mt-2 rounded-md border border-amber-300 bg-amber-500/10 px-2 py-1 text-xs text-amber-700">
+                        {unavailableReason}
+                      </p>
+                    )}
               <div className="mt-3">
                 <div className="mb-1 flex items-center justify-between text-xs muted">
                   <span>Progress</span>
@@ -202,13 +243,19 @@ export default function DashboardPage() {
                 </p>
               </div>
                     <div className="mt-4 flex items-center gap-2">
-                      <Link
-                        href={`/courses/${entry.course.slug}`}
-                        className="btn btn-primary"
-                      >
-                        {isComplete ? "View" : "Continue"}
-                      </Link>
-                      {canTakeExam && (
+                      {isCourseAvailable ? (
+                        <Link
+                          href={`/courses/${entry.course.slug}`}
+                          className="btn btn-primary"
+                        >
+                          {isComplete ? "View" : "Continue"}
+                        </Link>
+                      ) : (
+                        <button type="button" className="btn btn-secondary cursor-not-allowed opacity-70" disabled>
+                          Unpublished
+                        </button>
+                      )}
+                      {isCourseAvailable && canTakeExam && (
                         examPassed ? (
                           <span className="btn btn-secondary pointer-events-none">
                             Score: {progress?.final_exam_score ?? "-"}%

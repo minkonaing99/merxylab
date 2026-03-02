@@ -20,6 +20,8 @@ class Course(TimeStampedModel):
     price_cents = models.PositiveIntegerField(default=0)
     thumbnail_url = models.URLField(blank=True)
     is_published = models.BooleanField(default=False)
+    publish_at = models.DateTimeField(null=True, blank=True)
+    unpublish_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["id"]
@@ -314,3 +316,61 @@ class ActiveStreamSession(TimeStampedModel):
 
     def __str__(self):
         return f"{self.user_id} - {self.device_id} ({self.status})"
+
+
+class EndpointRateLimit(TimeStampedModel):
+    scope = models.CharField(max_length=64)
+    subject_key = models.CharField(max_length=255)
+    window_started_at = models.DateTimeField()
+    attempt_count = models.PositiveIntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["scope", "subject_key"], name="uniq_rate_limit_scope_subject"),
+        ]
+        indexes = [
+            models.Index(fields=["scope", "locked_until"]),
+        ]
+
+    def __str__(self):
+        return f"rate-limit:{self.scope}:{self.subject_key}:{self.attempt_count}"
+
+
+class VideoTranscodeJob(TimeStampedModel):
+    class Status(models.TextChoices):
+        QUEUED = "QUEUED", "Queued"
+        PROCESSING = "PROCESSING", "Processing"
+        RETRYING = "RETRYING", "Retrying"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
+
+    lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name="video_jobs")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="video_jobs",
+    )
+    source_file = models.CharField(max_length=512)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    progress_percent = models.PositiveSmallIntegerField(default=0)
+    attempt_count = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=3)
+    task_id = models.CharField(max_length=128, blank=True)
+    error_message = models.TextField(blank=True)
+    output_hls_master_path = models.CharField(max_length=512, blank=True)
+    output_duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["lesson", "status"]),
+        ]
+
+    def __str__(self):
+        return f"video-job:{self.id}:{self.lesson_id}:{self.status}"

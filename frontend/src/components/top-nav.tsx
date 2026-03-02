@@ -16,6 +16,9 @@ export function TopNav() {
   const clientTheme = useSyncExternalStore(subscribeThemeChange, getTheme, () => "light");
   const [role, setRole] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(
+    typeof document !== "undefined" ? Boolean(document.fullscreenElement) : false,
+  );
   const showAuthedNav = role !== null;
   const logoSrc = clientTheme === "dark" ? "/merxylab-logo-dark.png" : "/merxylab-logo-light.png";
   const desktopActionClass = "btn px-3 py-1.5 text-xs sm:w-auto sm:text-sm";
@@ -35,6 +38,19 @@ export function TopNav() {
       })
       .catch(() => setRole("student"));
   }, [accessToken]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+      if (document.fullscreenElement) {
+        setMobileOpen(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+    };
+  }, []);
 
   const handleLogout = () => {
     clearTokens();
@@ -60,6 +76,10 @@ export function TopNav() {
   );
 
   const renderActions = (actionClass: string, onAction?: () => void) => {
+    if (isFullscreen) {
+      return role === "admin" ? null : renderThemeToggle(actionClass, onAction);
+    }
+
     if (pathname === "/") {
       return (
         <Link className={`${actionClass} btn-primary`} href="/register" onClick={onAction}>
@@ -118,6 +138,9 @@ export function TopNav() {
             <Link className={`${actionClass} btn-primary`} href="/admin-ui" onClick={onAction}>
               Admin
             </Link>
+            <Link className={`${actionClass} btn-secondary`} href="/admin-schedule" onClick={onAction}>
+              Schedule
+            </Link>
             <Link className={`${actionClass} btn-secondary`} href="/admin-students" onClick={onAction}>
               Students
             </Link>
@@ -165,6 +188,9 @@ export function TopNav() {
           {renderActions(desktopActionClass)}
         </div>
         <div className="sm:hidden">
+          {isFullscreen && role !== "admin" ? (
+            renderThemeToggle("btn btn-secondary px-3 py-1.5 text-xs")
+          ) : (
           <button
             type="button"
             className="btn btn-secondary px-3 py-1.5 text-xs"
@@ -175,9 +201,10 @@ export function TopNav() {
           >
             {mobileOpen ? "Close" : "Menu"}
           </button>
+          )}
         </div>
       </nav>
-      {mobileOpen && (
+      {mobileOpen && !isFullscreen && (
         <div id="mobile-nav-menu" className="mx-auto w-full max-w-6xl border-t px-4 pb-3 sm:hidden">
           <div className="grid gap-2 pt-3">
             {renderActions(mobileActionClass, () => setMobileOpen(false))}
