@@ -31,14 +31,8 @@ htmlcov/
 
 # Django local artifacts
 db.sqlite3
-backend/db.sqlite3
 backend/media/
-backend/media/hls/
 backend/staticfiles/
-
-# Migrations cache compiled files
-backend/**/__pycache__/
-backend/**/migrations/__pycache__/
 
 # -----------------------------
 # Node / Next.js
@@ -56,11 +50,7 @@ frontend/coverage/
 .env
 .env.*
 !.env.example
-backend/.env
-backend/.env.*
 !backend/.env.example
-frontend/.env.local
-frontend/.env.local.*
 !frontend/.env.local.example
 
 # -----------------------------

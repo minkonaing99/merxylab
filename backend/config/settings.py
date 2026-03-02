@@ -9,6 +9,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, "true" if default else "false").lower() in {"1", "true", "yes", "on"}
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
@@ -16,7 +20,7 @@ load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-local-dev-key")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
+DEBUG = env_bool("DJANGO_DEBUG", True)
 
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")]
 
@@ -118,7 +122,9 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / os.getenv("STATIC_ROOT", "staticfiles")
+MEDIA_URL = os.getenv("MEDIA_URL", "/media/")
 MEDIA_ROOT = BASE_DIR / os.getenv("MEDIA_ROOT", "media")
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -127,6 +133,16 @@ CORS_ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ALLOWED_ORI
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:3000").split(",")]
+
+SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", False)
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
+
+if env_bool("USE_X_FORWARDED_PROTO", False):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -149,6 +165,22 @@ STREAM_TOKEN_TTL_SECONDS = int(os.getenv("STREAM_TOKEN_TTL_SECONDS", "120"))
 STREAM_SESSION_COOLDOWN_SECONDS = int(os.getenv("STREAM_SESSION_COOLDOWN_SECONDS", "30"))
 QUIZ_FAIL_LIMIT_PER_DAY = int(os.getenv("QUIZ_FAIL_LIMIT_PER_DAY", "3"))
 QUIZ_FAIL_COOLDOWN_MINUTES = int(os.getenv("QUIZ_FAIL_COOLDOWN_MINUTES", "30"))
+FINAL_EXAM_RETRY_FEE_CREDITS = int(os.getenv("FINAL_EXAM_RETRY_FEE_CREDITS", "50"))
+AUTH_LOGIN_IP_RATE_LIMIT = int(os.getenv("AUTH_LOGIN_IP_RATE_LIMIT", "25"))
+AUTH_LOGIN_IP_RATE_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_IP_RATE_WINDOW_SECONDS", "300"))
+AUTH_LOGIN_IP_RATE_LOCK_SECONDS = int(os.getenv("AUTH_LOGIN_IP_RATE_LOCK_SECONDS", "900"))
+AUTH_LOGIN_USER_RATE_LIMIT = int(os.getenv("AUTH_LOGIN_USER_RATE_LIMIT", "8"))
+AUTH_LOGIN_USER_RATE_WINDOW_SECONDS = int(os.getenv("AUTH_LOGIN_USER_RATE_WINDOW_SECONDS", "300"))
+AUTH_LOGIN_USER_RATE_LOCK_SECONDS = int(os.getenv("AUTH_LOGIN_USER_RATE_LOCK_SECONDS", "900"))
+AUTH_REGISTER_IP_RATE_LIMIT = int(os.getenv("AUTH_REGISTER_IP_RATE_LIMIT", "10"))
+AUTH_REGISTER_IP_RATE_WINDOW_SECONDS = int(os.getenv("AUTH_REGISTER_IP_RATE_WINDOW_SECONDS", "3600"))
+AUTH_REGISTER_IP_RATE_LOCK_SECONDS = int(os.getenv("AUTH_REGISTER_IP_RATE_LOCK_SECONDS", "3600"))
+EXAM_SUBMIT_RATE_LIMIT = int(os.getenv("EXAM_SUBMIT_RATE_LIMIT", "30"))
+EXAM_SUBMIT_RATE_WINDOW_SECONDS = int(os.getenv("EXAM_SUBMIT_RATE_WINDOW_SECONDS", "600"))
+EXAM_SUBMIT_RATE_LOCK_SECONDS = int(os.getenv("EXAM_SUBMIT_RATE_LOCK_SECONDS", "1800"))
+QUIZ_SUBMIT_RATE_LIMIT = int(os.getenv("QUIZ_SUBMIT_RATE_LIMIT", "50"))
+QUIZ_SUBMIT_RATE_WINDOW_SECONDS = int(os.getenv("QUIZ_SUBMIT_RATE_WINDOW_SECONDS", "600"))
+QUIZ_SUBMIT_RATE_LOCK_SECONDS = int(os.getenv("QUIZ_SUBMIT_RATE_LOCK_SECONDS", "900"))
 
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "")
@@ -156,3 +188,13 @@ FFPROBE_BIN = os.getenv("FFPROBE_BIN", "")
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "merxylab")
 MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", "2000"))
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "7500"))
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "7200"))
+
+VIDEO_TRANSCODE_MAX_ATTEMPTS = int(os.getenv("VIDEO_TRANSCODE_MAX_ATTEMPTS", "3"))
+VIDEO_TRANSCODE_RETRY_BASE_SECONDS = int(os.getenv("VIDEO_TRANSCODE_RETRY_BASE_SECONDS", "45"))
+VIDEO_TRANSCODE_TIMEOUT_SECONDS = int(os.getenv("VIDEO_TRANSCODE_TIMEOUT_SECONDS", "7200"))
