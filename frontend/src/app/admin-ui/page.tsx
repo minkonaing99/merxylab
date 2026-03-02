@@ -114,8 +114,17 @@ type UploadJob = {
   error_message?: string;
 };
 
+type BulkImportResponse = {
+  detail: string;
+  created_courses: number;
+  created_lessons: number;
+  created_quizzes: number;
+  created_quiz_questions: number;
+};
+
 type FeedbackTarget =
   | "global"
+  | "bulk-import"
   | "step1-course"
   | "step2-lesson"
   | "step3-upload"
@@ -126,7 +135,7 @@ type FeedbackTarget =
   | "manage-lesson"
   | "manage-quiz";
 
-type AdminView = "build" | "manage" | "insights";
+type AdminView = "build" | "manage" | "insights" | "import";
 const COURSE_LEVEL_OPTIONS = ["Beginner", "Intermediate", "Advanced"] as const;
 const NEW_COURSE_SELECTOR_VALUE = "__new__";
 const toDateTimeLocalValue = (iso?: string | null) => {
@@ -158,6 +167,50 @@ const FINAL_EXAM_JSON_SAMPLE = `[
     "correct": "B"
   }
 ]`;
+
+const BULK_IMPORT_JSON_SAMPLE = `{
+  "courses": [
+    {
+      "title": "Python Basics",
+      "slug": "python-basics",
+      "description": "Intro Python course",
+      "level": "Beginner",
+      "price_credits": 100,
+      "is_published": true,
+      "lessons": [
+        {
+          "section_title": "Getting Started",
+          "section_order": 1,
+          "title": "What is Python?",
+          "order": 1,
+          "content_type": "READING",
+          "reading_content": "/h1 Welcome\\n/p Python is beginner-friendly."
+        },
+        {
+          "section_title": "Getting Started",
+          "section_order": 1,
+          "title": "Variables and Types",
+          "order": 2,
+          "content_type": "VIDEO",
+          "quiz": {
+            "passing_score": 70,
+            "time_limit_sec": 120,
+            "questions": [
+              {
+                "prompt": "Which keyword defines a function?",
+                "order": 1,
+                "choices": [
+                  { "text": "func", "is_correct": false },
+                  { "text": "def", "is_correct": true }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}`;
 
 export default function AdminUiPage() {
   const router = useRouter();
@@ -268,6 +321,8 @@ export default function AdminUiPage() {
   const [finalExamInputMode, setFinalExamInputMode] = useState<"manual" | "json">("manual");
   const [finalExamJsonInput, setFinalExamJsonInput] = useState(FINAL_EXAM_JSON_SAMPLE);
   const [finalExamExists, setFinalExamExists] = useState(false);
+  const [bulkImportText, setBulkImportText] = useState(BULK_IMPORT_JSON_SAMPLE);
+  const [bulkImportResult, setBulkImportResult] = useState<BulkImportResponse | null>(null);
   const {
     beginUploading,
     updateUploadingProgress,
@@ -519,6 +574,33 @@ export default function AdminUiPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const submitBulkImport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!accessToken) return;
+
+    await runAction(
+      async () => {
+        const result = await apiFetch<BulkImportResponse>(
+          "/admin/bulk-import/",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              text: bulkImportText,
+            }),
+          },
+          accessToken,
+        );
+
+        setBulkImportResult(result);
+        if (result.created_courses > 0) {
+          setIsCreatingNewCourse(false);
+        }
+      },
+      "Bulk import completed.",
+      "bulk-import",
+    );
   };
 
   const createCourse = async (event: FormEvent<HTMLFormElement>) => {
@@ -1227,7 +1309,7 @@ export default function AdminUiPage() {
               Build course content, manage existing content, and monitor performance from one place.
             </p>
           </div>
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-4">
             <button
               type="button"
               onClick={() => setActiveView("build")}
@@ -1248,6 +1330,13 @@ export default function AdminUiPage() {
               className={`rounded-lg px-3 py-2 text-sm font-medium ${activeView === "insights" ? "bg-slate-900 text-white" : "border border-slate-300 bg-white"}`}
             >
               Insights
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveView("import")}
+              className={`rounded-lg px-3 py-2 text-sm font-medium ${activeView === "import" ? "bg-slate-900 text-white" : "border border-slate-300 bg-white"}`}
+            >
+              Import
             </button>
           </div>
         </div>
@@ -1341,6 +1430,53 @@ export default function AdminUiPage() {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {activeView === "import" && (
+        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="text-lg font-semibold">Bulk Import Courses / Lessons / Quizzes</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            Import structured content quickly from JSON (copy/paste). This creates new courses with lessons and optional quiz payloads.
+          </p>
+
+          <form onSubmit={submitBulkImport} className="mt-3 space-y-3">
+            <textarea
+              className="min-h-[220px] w-full rounded border px-3 py-2 font-mono text-xs"
+              value={bulkImportText}
+              onChange={(e) => setBulkImportText(e.target.value)}
+              spellCheck={false}
+              placeholder="Paste JSON payload here..."
+            />
+
+            <div className="rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+              <p className="font-medium text-slate-700">JSON only</p>
+              <p className="mt-1">
+                Use the sample structure exactly: top-level <code>courses</code> array with each course containing a <code>lessons</code> array.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button disabled={loading} className="rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60">
+                {loading ? "Importing..." : "Run Bulk Import"}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+                onClick={() => setBulkImportText(BULK_IMPORT_JSON_SAMPLE)}
+              >
+                Reset Example
+              </button>
+            </div>
+          </form>
+
+          {renderFeedback("bulk-import")}
+          {bulkImportResult && (
+            <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+              Imported: {bulkImportResult.created_courses} course(s), {bulkImportResult.created_lessons} lesson(s),{" "}
+              {bulkImportResult.created_quizzes} quiz(es), {bulkImportResult.created_quiz_questions} quiz question(s).
+            </div>
+          )}
         </section>
       )}
 
@@ -1465,10 +1601,9 @@ export default function AdminUiPage() {
             {step3Mode === "READING" ? "Step 3: Edit Reading Content" : "Step 3: Upload Lesson Video"}
           </h2>
           <select
-            className="mt-3 w-full rounded border px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60"
+            className="mt-3 w-full rounded border px-3 py-2"
             value={selectedLessonIdForVideo ?? ""}
             onChange={(e) => setSelectedLessonIdForVideo(e.target.value ? Number(e.target.value) : null)}
-            disabled={step3Mode === "READING"}
           >
             <option value="">Select lesson</option>
             {selectedCourseLessons.map((lesson) => (

@@ -1,4 +1,5 @@
 import mimetypes
+import json
 import random
 import shutil
 import uuid
@@ -1688,6 +1689,228 @@ def admin_certificate_verification_logs(request):
         logs = logs.filter(certificate__user_id=int(user_id))
     logs = logs[:300]
     return Response(CertificateVerificationLogSerializer(logs, many=True).data)
+
+
+def _import_to_bool(value, default=False):
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n"}:
+        return False
+    return default
+
+
+def _import_to_int(value, default=0, minimum=None):
+    if value in (None, ""):
+        return default
+    number = int(value)
+    if minimum is not None and number < minimum:
+        raise serializers.ValidationError(f"Value must be >= {minimum}.")
+    return number
+
+
+def _build_quiz_payload_from_import(quiz_data):
+    questions_input = list(quiz_data.get("questions") or [])
+    if not questions_input:
+        return {}
+
+    question_id_seq = 1
+    choice_id_seq = 1
+    questions = []
+    for q_index, question_item in enumerate(questions_input, start=1):
+        prompt = str(question_item.get("prompt", "")).strip()
+        if not prompt:
+            raise serializers.ValidationError(f"Quiz question {q_index} prompt is required.")
+        choices_input = list(question_item.get("choices") or [])
+        if len(choices_input) < 2:
+            raise serializers.ValidationError(f"Quiz question {q_index} must have at least 2 choices.")
+        choices = []
+        has_correct = False
+        for c_index, choice_item in enumerate(choices_input, start=1):
+            text = str(choice_item.get("text", "")).strip()
+            if not text:
+                raise serializers.ValidationError(f"Quiz question {q_index} choice {c_index} text is required.")
+            is_correct = bool(choice_item.get("is_correct", False))
+            has_correct = has_correct or is_correct
+            choices.append(
+                {
+                    "id": choice_id_seq,
+                    "text": text,
+                    "is_correct": is_correct,
+                }
+            )
+            choice_id_seq += 1
+        if not has_correct:
+            raise serializers.ValidationError(f"Quiz question {q_index} must include at least one correct choice.")
+        questions.append(
+            {
+                "id": question_id_seq,
+                "prompt": prompt,
+                "type": "MCQ",
+                "order": int(question_item.get("order") or q_index),
+                "choices": choices,
+            }
+        )
+        question_id_seq += 1
+
+    return {
+        "passing_score": _import_to_int(quiz_data.get("passing_score"), default=70, minimum=0),
+        "time_limit_sec": _import_to_int(quiz_data.get("time_limit_sec"), default=None, minimum=1)
+        if quiz_data.get("time_limit_sec") not in (None, "")
+        else None,
+        "questions": sorted(questions, key=lambda item: (item["order"], item["id"])),
+    }
+
+
+def _normalize_bulk_import_courses(raw_courses):
+    if not isinstance(raw_courses, list) or not raw_courses:
+        raise serializers.ValidationError("Import payload must include a non-empty `courses` list.")
+
+    normalized = []
+    seen_slugs = set()
+    for idx, course_item in enumerate(raw_courses, start=1):
+        if not isinstance(course_item, dict):
+            raise serializers.ValidationError(f"Course #{idx} must be an object.")
+
+        title = str(course_item.get("title", "")).strip()
+        if not title:
+            raise serializers.ValidationError(f"Course #{idx} title is required.")
+        slug_raw = str(course_item.get("slug", "")).strip()
+        slug_value = slugify(slug_raw or title)
+        if not slug_value:
+            raise serializers.ValidationError(f"Course #{idx} slug is invalid.")
+        if slug_value in seen_slugs:
+            raise serializers.ValidationError(f"Duplicate slug in import payload: `{slug_value}`.")
+        seen_slugs.add(slug_value)
+
+        lessons_raw = course_item.get("lessons") or []
+        if not isinstance(lessons_raw, list) or not lessons_raw:
+            raise serializers.ValidationError(f"Course `{slug_value}` must include at least one lesson.")
+
+        lessons = []
+        for lesson_index, lesson_item in enumerate(lessons_raw, start=1):
+            if not isinstance(lesson_item, dict):
+                raise serializers.ValidationError(f"Course `{slug_value}` lesson #{lesson_index} must be an object.")
+
+            lesson_title = str(lesson_item.get("title", "")).strip()
+            if not lesson_title:
+                raise serializers.ValidationError(f"Course `{slug_value}` lesson #{lesson_index} title is required.")
+
+            content_type = str(lesson_item.get("content_type", "VIDEO")).strip().upper() or "VIDEO"
+            if content_type not in {Lesson.ContentType.VIDEO, Lesson.ContentType.READING}:
+                raise serializers.ValidationError(
+                    f"Course `{slug_value}` lesson `{lesson_title}` has invalid content_type `{content_type}`."
+                )
+
+            quiz_payload = {}
+            quiz_obj = lesson_item.get("quiz")
+            if quiz_obj:
+                if not isinstance(quiz_obj, dict):
+                    raise serializers.ValidationError(
+                        f"Course `{slug_value}` lesson `{lesson_title}` quiz must be an object."
+                    )
+                quiz_payload = _build_quiz_payload_from_import(quiz_obj)
+
+            lessons.append(
+                {
+                    "section_title": str(lesson_item.get("section_title", "Section 1")).strip() or "Section 1",
+                    "section_order": _import_to_int(lesson_item.get("section_order"), default=1, minimum=1),
+                    "title": lesson_title,
+                    "order": _import_to_int(lesson_item.get("order"), default=lesson_index, minimum=1),
+                    "content_type": content_type,
+                    "reading_content": str(lesson_item.get("reading_content", "")).strip(),
+                    "quiz_payload": quiz_payload,
+                }
+            )
+
+        normalized.append(
+            {
+                "title": title,
+                "slug": slug_value,
+                "description": str(course_item.get("description", "")).strip(),
+                "level": str(course_item.get("level", "Beginner")).strip() or "Beginner",
+                "price_cents": _import_to_int(course_item.get("price_cents", course_item.get("price_credits", 0)), default=0, minimum=0),
+                "is_published": _import_to_bool(course_item.get("is_published"), default=True),
+                "lessons": sorted(lessons, key=lambda item: (item["section_order"], item["order"], item["title"])),
+            }
+        )
+
+    existing_slugs = set(Course.objects.filter(slug__in=[item["slug"] for item in normalized]).values_list("slug", flat=True))
+    if existing_slugs:
+        slug_list = ", ".join(sorted(existing_slugs))
+        raise serializers.ValidationError(f"These course slugs already exist: {slug_list}")
+
+    return normalized
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_bulk_import(request):
+    raw_text = request.data.get("text")
+    if not raw_text:
+        return Response({"detail": "JSON text is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    parsed_payload = None
+    try:
+        parsed_payload = json.loads(str(raw_text))
+        if isinstance(parsed_payload, list):
+            parsed_payload = {"courses": parsed_payload}
+        if not isinstance(parsed_payload, dict):
+            raise serializers.ValidationError("JSON import payload must be an object with `courses` array.")
+    except json.JSONDecodeError as exc:
+        return Response({"detail": f"Invalid JSON: {str(exc)}"}, status=status.HTTP_400_BAD_REQUEST)
+    except serializers.ValidationError as exc:
+        return Response({"detail": exc.detail if hasattr(exc, "detail") else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        normalized_courses = _normalize_bulk_import_courses(parsed_payload.get("courses") or [])
+    except serializers.ValidationError as exc:
+        return Response({"detail": exc.detail if hasattr(exc, "detail") else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    created_courses = 0
+    created_lessons = 0
+    created_quizzes = 0
+    created_quiz_questions = 0
+    with transaction.atomic():
+        for course_data in normalized_courses:
+            course = Course.objects.create(
+                title=course_data["title"],
+                description=course_data["description"],
+                slug=course_data["slug"],
+                level=course_data["level"],
+                price_cents=course_data["price_cents"],
+                is_published=course_data["is_published"],
+            )
+            created_courses += 1
+            for lesson_data in course_data["lessons"]:
+                lesson = Lesson.objects.create(
+                    course=course,
+                    section_title=lesson_data["section_title"],
+                    section_order=lesson_data["section_order"],
+                    title=lesson_data["title"],
+                    order=lesson_data["order"],
+                    content_type=lesson_data["content_type"],
+                    is_preview=False,
+                    reading_content=lesson_data["reading_content"] if lesson_data["content_type"] == Lesson.ContentType.READING else "",
+                )
+                created_lessons += 1
+                if lesson_data["quiz_payload"]:
+                    set_quiz_payload(lesson, lesson_data["quiz_payload"])
+                    created_quizzes += 1
+                    created_quiz_questions += len(lesson_data["quiz_payload"].get("questions", []))
+
+    return Response(
+        {
+            "detail": "Bulk import completed.",
+            "created_courses": created_courses,
+            "created_lessons": created_lessons,
+            "created_quizzes": created_quizzes,
+            "created_quiz_questions": created_quiz_questions,
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 
 @api_view(["GET"])
