@@ -67,6 +67,7 @@ build/
 RUN_LOCAL.md
 merxylab.md
 instruction.md
+deployment.md
 
 # -----------------------------
 # Logs
