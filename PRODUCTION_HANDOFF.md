@@ -19,6 +19,9 @@ Backend required:
 - `DJANGO_DEBUG=false`
 - `DJANGO_ALLOWED_HOSTS=<api-domain>`
 - `MYSQL_*` connection values
+- `CELERY_BROKER_URL=redis://127.0.0.1:6379/0`
+- `CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/0`
+- `FRONTEND_BASE_URL=https://<frontend-domain>`
 - `CORS_ALLOWED_ORIGINS=https://<frontend-domain>`
 - `CSRF_TRUSTED_ORIGINS=https://<frontend-domain>`
 - `SESSION_COOKIE_SECURE=true`
@@ -32,6 +35,7 @@ Backend required:
 Optional but recommended:
 - `MONGO_URI`, `MONGO_DB`, `MONGO_TIMEOUT_MS`
 - `FFMPEG_BIN`, `FFPROBE_BIN` if not in PATH
+- Playwright Chromium installed for certificate PDF generation
 
 Frontend required:
 - `NEXT_PUBLIC_API_BASE_URL=https://<api-domain>/api`
@@ -69,6 +73,7 @@ If Mongo is enabled and you need to sync legacy SQL quiz payloads:
 - Admin login works in frontend and Django admin
 - Admin can create course/lesson/quiz/final exam
 - Video upload/transcoding works (FFmpeg present)
+- Celery worker processes queue and upload job status endpoint updates in UI
 - Student can register and enroll using credits
 - Progression lock works across lessons/quizzes
 - Final exam unlock + certificate issuance flow works
@@ -79,6 +84,7 @@ If Mongo is enabled and you need to sync legacy SQL quiz payloads:
 - SQL remains source of truth for relational entities and user progress.
 - Course/Lesson delete now performs media cleanup (HLS files) and quiz payload cleanup.
 - Profile deny clears stored passport photo file and sets verification note.
+- Admin UI has a global floating upload tracker panel visible only during active jobs.
 
 ## 7. Hardening Next (Recommended)
 - Move JWT storage from localStorage to httpOnly secure cookies.
