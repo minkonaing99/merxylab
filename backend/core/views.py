@@ -2,6 +2,7 @@ import mimetypes
 import random
 import shutil
 import uuid
+import base64
 from datetime import timedelta
 from pathlib import Path
 
@@ -9,12 +10,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core import signing
+from django.core.files.base import ContentFile
 from django.core.exceptions import SuspiciousFileOperation
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -23,6 +26,8 @@ from rest_framework.response import Response
 from core.models import (
     ActiveStreamSession,
     Certificate,
+    CertificateAuditLog,
+    CertificateVerificationLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -41,11 +46,13 @@ from core.models import (
 )
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from core.permissions import IsAdminRole
+from core.certificates import ensure_certificate_signature, validate_certificate_signature
 from core.mongo_store import delete_quiz_payload, get_quiz_map, get_quiz_payload, set_quiz_payload
 from core.serializers import (
     AdminCreditAdjustSerializer,
     AdminCourseCreateSerializer,
     AdminCourseUpdateSerializer,
+    AdminCertificateActionSerializer,
     AdminFinalExamUpsertSerializer,
     AdminLessonCreateSerializer,
     AdminLessonUpdateSerializer,
@@ -56,6 +63,8 @@ from core.serializers import (
     AdminUploadHlsMetadataSerializer,
     AdminUploadVideoSerializer,
     CertificateSerializer,
+    CertificateAuditLogSerializer,
+    CertificateVerificationLogSerializer,
     CreditTransactionSerializer,
     CreditWalletSerializer,
     CourseDetailSerializer,
@@ -300,6 +309,11 @@ def _is_profile_completed(profile):
     return all(flags.values()) and profile.verification_status == StudentProfile.VerificationStatus.VERIFIED
 
 
+def _is_profile_verified(user):
+    profile, _ = StudentProfile.objects.get_or_create(user=user)
+    return profile.verification_status == StudentProfile.VerificationStatus.VERIFIED
+
+
 def _wallet_for_user(user):
     wallet, _ = CreditWallet.objects.get_or_create(user=user, defaults={"balance_credits": 0})
     return wallet
@@ -515,6 +529,227 @@ def _video_job_payload(job):
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+def _create_certificate_audit_log(*, certificate, action, actor=None, reason="", meta=None):
+    return CertificateAuditLog.objects.create(
+        certificate=certificate,
+        action=action,
+        actor=actor,
+        reason=(reason or "").strip(),
+        meta=meta or {},
+    )
+
+
+def _create_certificate_verification_log(
+    *,
+    verification_code,
+    status,
+    request,
+    certificate=None,
+    detail="",
+):
+    ip_value = _client_ip(request)[:64] if request else ""
+    ua_value = str(request.META.get("HTTP_USER_AGENT", ""))[:255] if request else ""
+    return CertificateVerificationLog.objects.create(
+        certificate=certificate,
+        verification_code=(verification_code or "").strip().upper()[:32],
+        status=status,
+        ip_address=ip_value,
+        user_agent=ua_value,
+        detail=(detail or "")[:255],
+    )
+
+
+def _new_certificate_code():
+    return uuid.uuid4().hex[:16].upper()
+
+
+def _student_display_name(user):
+    profile = StudentProfile.objects.filter(user=user).first()
+    if profile and profile.full_name:
+        return profile.full_name.strip()
+    return user.get_full_name().strip() or user.username
+
+
+def _certificate_logo_data_uri():
+    logo_path = (Path(settings.BASE_DIR).parent / "frontend" / "public" / "merxylab-logo-dark.png").resolve()
+    if not logo_path.exists():
+        return ""
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _certificate_pdf_html(*, student_name, course_title, certificate_code, verification_code, verification_url, issued_at):
+    logo_data = _certificate_logo_data_uri()
+    issued_text = timezone.localtime(issued_at).strftime("%m/%d/%Y, %I:%M %p") if issued_at else "N/A"
+    qr_image_url = (
+        f"https://quickchart.io/qr?size=140&text={verification_url}"
+        if verification_url else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root {{
+      --ink:#0f172a; --muted:#475569; --accent:#0f766e; --accent2:#134e4a; --line:#cbd5e1; --paper:#fff;
+    }}
+    html,body {{ margin:0; padding:0; background:#e2e8f0; font-family:Segoe UI,Tahoma,sans-serif; color:var(--ink); }}
+    .page {{ width:1123px; height:794px; margin:0 auto; background:var(--paper); position:relative; overflow:hidden; }}
+    .frame {{ position:absolute; inset:26px; border:2px solid var(--line); }}
+    .inner {{ position:absolute; inset:40px; border:1px solid #d8e1ee; background:#fff; display:flex; flex-direction:column; }}
+    .header {{ height:156px; background:linear-gradient(120deg,var(--accent2),var(--accent)); display:flex; align-items:center; justify-content:space-between; padding:0 44px; }}
+    .header img {{ width:200px; height:200px; object-fit:contain; }}
+    .header-copy {{ color:#ecfeff; text-align:right; }}
+    .header-copy p {{ margin:0; letter-spacing:.16em; text-transform:uppercase; font-size:11px; }}
+    .header-copy h2 {{ margin:8px 0 0; font-size:30px; }}
+    .content {{ flex:1; padding:26px 50px 28px; text-align:center; display:flex; flex-direction:column; justify-content:space-between; }}
+    .eyebrow {{ margin:0; color:var(--muted); letter-spacing:.22em; text-transform:uppercase; font-size:11px; }}
+    .title {{ margin:10px 0 0; font-size:46px; font-family:Georgia,serif; }}
+    .name {{ margin:18px 0 0; font-size:44px; color:var(--accent); font-weight:700; }}
+    .desc {{ margin:12px 0 0; font-size:18px; color:var(--muted); }}
+    .course {{ margin:10px 0 0; font-size:35px; font-weight:700; color:#0a2540; }}
+    .meta {{ margin:18px auto 0; width:100%; max-width:900px; display:grid; grid-template-columns:1fr 1fr; gap:14px; text-align:left; }}
+    .meta-card {{ border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:#f8fafc; }}
+    .meta-key {{ font-size:10px; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); }}
+    .meta-val {{ margin-top:6px; font-size:15px; font-weight:600; }}
+    .trust {{ margin:14px auto 0; width:100%; max-width:900px; display:grid; grid-template-columns:1fr auto; gap:16px; align-items:center; text-align:left; }}
+    .trust-left {{ border:1px dashed #c6d2e2; border-radius:12px; background:#f8fbff; padding:10px 12px; font-size:11px; color:var(--muted); }}
+    .qr-wrap {{ width:126px; text-align:center; font-size:11px; color:var(--muted); }}
+    .qr-wrap img {{ width:112px; height:112px; border:1px solid var(--line); border-radius:10px; background:#fff; padding:4px; }}
+  </style>
+</head>
+<body>
+  <article class="page">
+    <div class="frame"></div>
+    <div class="inner">
+      <header class="header">
+        <div>{f'<img src="{logo_data}" alt="MerxyLab logo" />' if logo_data else ''}</div>
+        <div class="header-copy">
+          <p>Official Learning Credential</p>
+          <h2>Certificate of Achievement</h2>
+        </div>
+      </header>
+      <section class="content">
+        <div>
+          <p class="eyebrow">Certificate of Completion</p>
+          <h1 class="title">Awarded To</h1>
+          <p class="name">{student_name}</p>
+          <p class="desc">for successfully completing the course</p>
+          <p class="course">{course_title}</p>
+          <div class="meta">
+            <div class="meta-card"><div class="meta-key">Certificate Code</div><div class="meta-val">{certificate_code}</div></div>
+            <div class="meta-card"><div class="meta-key">Issued At</div><div class="meta-val">{issued_text}</div></div>
+          </div>
+          <div class="trust">
+            <div class="trust-left">
+              <div><strong>Verification Code:</strong> {verification_code}</div>
+              <div><strong>Verification URL:</strong> {verification_url or 'N/A'}</div>
+            </div>
+            <div class="qr-wrap">
+              {f'<img src="{qr_image_url}" alt="Certificate verification QR" />' if qr_image_url else ''}
+              <div>Scan to verify</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </article>
+</body>
+</html>"""
+
+
+def _render_certificate_pdf_bytes(html):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        return None, f"Playwright unavailable: {exc}"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1123, "height": 794})
+            page.set_content(html, wait_until="networkidle")
+            pdf_bytes = page.pdf(
+                width="1123px",
+                height="794px",
+                print_background=True,
+                margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+            )
+            browser.close()
+            return pdf_bytes, ""
+    except Exception as exc:
+        return None, f"Failed to generate certificate PDF: {exc}"
+
+
+def _ensure_certificate_pdf(certificate, request=None):
+    if certificate.certificate_pdf:
+        try:
+            if certificate.certificate_pdf.storage.exists(certificate.certificate_pdf.name):
+                return True, ""
+        except Exception:
+            pass
+
+    ensure_certificate_signature(certificate)
+    verification_url = f"{settings.FRONTEND_BASE_URL}/verify/{certificate.verification_code}"
+    student_name = _student_display_name(certificate.user)
+    html = _certificate_pdf_html(
+        student_name=student_name,
+        course_title=certificate.course.title,
+        certificate_code=certificate.certificate_code,
+        verification_code=certificate.verification_code,
+        verification_url=verification_url,
+        issued_at=certificate.issued_at,
+    )
+    pdf_bytes, error = _render_certificate_pdf_bytes(html)
+    if not pdf_bytes:
+        return False, error or "Failed to generate certificate PDF."
+
+    safe_course = slugify(certificate.course.title) or f"course-{certificate.course_id}"
+    filename = f"certificates/pdfs/{safe_course}-{certificate.certificate_code}.pdf"
+    certificate.certificate_pdf.save(filename, ContentFile(pdf_bytes), save=True)
+    return True, ""
+
+
+def _ensure_course_certificate_for_user(user, course, request=None):
+    certificate = (
+        Certificate.objects.filter(user=user, course=course)
+        .select_related("exam_attempt", "course", "user")
+        .first()
+    )
+    if certificate is not None:
+        ensure_certificate_signature(certificate)
+        return certificate, False
+
+    exam = FinalExam.objects.filter(course=course, is_published=True).first()
+    if exam is None:
+        return None, False
+
+    passed_attempt = (
+        FinalExamAttempt.objects.filter(user=user, exam=exam, passed=True)
+        .order_by("-attempted_at", "-id")
+        .first()
+    )
+    if passed_attempt is None:
+        return None, False
+
+    certificate = Certificate.objects.create(
+        user=user,
+        course=course,
+        exam_attempt=passed_attempt,
+        certificate_code=_new_certificate_code(),
+    )
+    ensure_certificate_signature(certificate)
+    _create_certificate_audit_log(
+        certificate=certificate,
+        action=CertificateAuditLog.Action.ISSUED,
+        actor=user,
+        reason="Certificate issued after profile verification from existing passed final exam.",
+        meta={"course_id": course.id, "exam_attempt_id": passed_attempt.id, "issued_from_existing_pass": True},
+    )
+    _ensure_certificate_pdf(certificate, request=request)
+    return certificate, True
 
 
 def _active_session_for_token(payload, lesson_id):
@@ -1214,18 +1449,32 @@ def submit_course_final_exam(request, course_id):
         FinalExamSession.objects.filter(user=request.user, exam=exam).delete()
         certificate = None
         certificate_created = False
-        if passed:
+        profile_verified = _is_profile_verified(request.user)
+        if passed and profile_verified:
             certificate, certificate_created = Certificate.objects.get_or_create(
                 user=request.user,
                 course=course,
                 defaults={
                     "exam_attempt": attempt,
-                    "certificate_code": uuid.uuid4().hex[:16].upper(),
+                    "certificate_code": _new_certificate_code(),
                 },
             )
             if not certificate_created and certificate.exam_attempt_id is None:
                 certificate.exam_attempt = attempt
                 certificate.save(update_fields=["exam_attempt", "updated_at"])
+            ensure_certificate_signature(certificate)
+            if certificate_created:
+                _create_certificate_audit_log(
+                    certificate=certificate,
+                    action=CertificateAuditLog.Action.ISSUED,
+                    actor=request.user,
+                    reason="Final exam passed.",
+                    meta={"course_id": course.id, "exam_attempt_id": attempt.id},
+                )
+
+    # Generate and store PDF once certificate is issued (best-effort, non-blocking for exam result).
+    if passed and certificate is not None:
+        _ensure_certificate_pdf(certificate, request=request)
 
     payload = FinalExamAttemptSerializer(attempt).data
     payload["summary"] = {
@@ -1233,9 +1482,13 @@ def submit_course_final_exam(request, course_id):
         "correct_answers": correct_count,
         "passing_score": int(exam.passing_score),
     }
-    payload["certificate_issued"] = bool(passed)
-    payload["certificate_created"] = bool(certificate_created) if passed else False
-    payload["certificate"] = CertificateSerializer(certificate).data if passed and certificate else None
+    payload["certificate_issued"] = bool(passed and certificate is not None)
+    payload["certificate_created"] = bool(certificate_created) if passed and certificate is not None else False
+    payload["certificate"] = (
+        CertificateSerializer(certificate, context={"request": request}).data if passed and certificate else None
+    )
+    if passed and certificate is None:
+        payload["certificate_blocked_reason"] = "Profile must be verified before certificate issuance."
     payload["charged_credits"] = charged_credits
     return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -1261,10 +1514,162 @@ def my_course_certificate(request, course_id):
     _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
-    certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
+    if not _is_profile_verified(request.user):
+        return Response(
+            {"detail": "Profile verification is required before certificate access."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    certificate, _created_now = _ensure_course_certificate_for_user(request.user, course, request=request)
     if certificate is None:
         return Response({"issued": False, "detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
-    return Response({"issued": True, "certificate": CertificateSerializer(certificate).data})
+    return Response(
+        {
+            "issued": True,
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_course_certificate_pdf(request, course_id):
+    course = get_object_or_404(Course, id=course_id)
+    _assert_course_live(course)
+    if not _is_enrolled(request.user, course):
+        return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+    if not _is_profile_verified(request.user):
+        return Response(
+            {"detail": "Profile verification is required before certificate access."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    certificate, _created_now = _ensure_course_certificate_for_user(request.user, course, request=request)
+    if certificate is None:
+        return Response({"detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)
+
+    ok, error = _ensure_certificate_pdf(certificate, request=request)
+    if not ok:
+        return Response(
+            {"detail": error or "PDF generator unavailable. Install playwright and run 'playwright install chromium'."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    safe_title = "".join(ch.lower() if ch.isalnum() else "-" for ch in course.title).strip("-") or "course"
+    response = FileResponse(certificate.certificate_pdf.open("rb"), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="certificate-{safe_title}.pdf"'
+    return response
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def public_verify_certificate(request, verification_code):
+    code = str(verification_code or "").strip().upper()
+    ip_key = f"ip:{_safe_subject(_client_ip(request))}"
+    ok, retry_after = _rate_limit_hit(
+        scope="certificate_verify_ip",
+        subject_key=ip_key,
+        limit=int(getattr(settings, "CERT_VERIFY_RATE_LIMIT", 120)),
+        window_seconds=int(getattr(settings, "CERT_VERIFY_RATE_WINDOW_SECONDS", 300)),
+        lock_seconds=int(getattr(settings, "CERT_VERIFY_RATE_LOCK_SECONDS", 300)),
+    )
+    if not ok:
+        _create_certificate_verification_log(
+            verification_code=code,
+            status=CertificateVerificationLog.Status.RATE_LIMITED,
+            request=request,
+            detail="Too many verification requests from this IP.",
+        )
+        return _rate_limit_response("Too many verification requests. Try again later.", retry_after)
+
+    certificate = (
+        Certificate.objects.select_related("user", "course", "user__student_profile")
+        .filter(verification_code=code)
+        .first()
+    )
+    if certificate is None:
+        _create_certificate_verification_log(
+            verification_code=code,
+            status=CertificateVerificationLog.Status.NOT_FOUND,
+            request=request,
+            detail="Verification code not found.",
+        )
+        return Response(
+            {"valid": False, "status": "not_found", "detail": "Certificate not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if not certificate.verification_code or not certificate.signed_payload or not certificate.signature_version:
+        ensure_certificate_signature(certificate)
+    signature_valid, signature_state = validate_certificate_signature(certificate)
+
+    status_label = "valid"
+    detail = "Certificate is valid."
+    if certificate.revoked_at:
+        status_label = "revoked"
+        detail = "Certificate has been revoked."
+    elif not signature_valid:
+        status_label = "invalid_signature"
+        detail = "Certificate signature check failed."
+
+    student_name = ""
+    profile = getattr(certificate.user, "student_profile", None)
+    if profile and profile.full_name:
+        student_name = profile.full_name.strip()
+    if not student_name:
+        student_name = certificate.user.get_full_name().strip() or certificate.user.username
+
+    log_status = CertificateVerificationLog.Status.VALID
+    if status_label == "revoked":
+        log_status = CertificateVerificationLog.Status.REVOKED
+    elif status_label == "invalid_signature":
+        log_status = CertificateVerificationLog.Status.INVALID_SIGNATURE
+    _create_certificate_verification_log(
+        verification_code=code,
+        status=log_status,
+        request=request,
+        certificate=certificate,
+        detail=detail,
+    )
+
+    return Response(
+        {
+            "valid": bool(status_label == "valid"),
+            "status": status_label,
+            "detail": detail,
+            "certificate": {
+                "certificate_code": certificate.certificate_code,
+                "verification_code": certificate.verification_code,
+                "student_name": student_name,
+                "course_title": certificate.course.title,
+                "issued_at": certificate.issued_at,
+                "revoked_at": certificate.revoked_at,
+                "revoked_reason": certificate.revoked_reason,
+                "signature_version": certificate.signature_version,
+                "signed_payload": certificate.signed_payload,
+                "signature_state": signature_state,
+            },
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_verification_logs(request):
+    logs = CertificateVerificationLog.objects.select_related(
+        "certificate",
+        "certificate__course",
+        "certificate__user",
+    ).order_by("-created_at", "-id")
+    code = str(request.query_params.get("verification_code", "")).strip().upper()
+    status_filter = str(request.query_params.get("status", "")).strip().upper()
+    user_id = str(request.query_params.get("user_id", "")).strip()
+    if code:
+        logs = logs.filter(verification_code=code)
+    if status_filter:
+        logs = logs.filter(status=status_filter)
+    if user_id.isdigit():
+        logs = logs.filter(certificate__user_id=int(user_id))
+    logs = logs[:300]
+    return Response(CertificateVerificationLogSerializer(logs, many=True).data)
 
 
 @api_view(["GET"])
@@ -1743,6 +2148,138 @@ def admin_student_profile_review(request, user_id):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, IsAdminRole])
+def admin_student_certificates(request, user_id):
+    user_model = get_user_model()
+    student = get_object_or_404(user_model, id=user_id)
+    if _role_for_user(student) != "student":
+        return Response({"detail": "Only student accounts are supported."}, status=status.HTTP_400_BAD_REQUEST)
+    certificates = (
+        Certificate.objects.filter(user=student)
+        .select_related("course", "exam_attempt")
+        .prefetch_related("audit_logs__actor")
+        .order_by("-issued_at", "-id")
+    )
+    payload = []
+    for cert in certificates:
+        ensure_certificate_signature(cert)
+        payload.append(
+            {
+                "certificate": CertificateSerializer(cert, context={"request": request}).data,
+                "course": {"id": cert.course_id, "title": cert.course.title},
+                "audit_logs": CertificateAuditLogSerializer(cert.audit_logs.all()[:20], many=True).data,
+            }
+        )
+    return Response(
+        {
+            "student": {"id": student.id, "username": student.username, "email": student.email or ""},
+            "certificates": payload,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_revoke(request, certificate_id):
+    certificate = get_object_or_404(Certificate.objects.select_related("course", "user"), id=certificate_id)
+    serializer = AdminCertificateActionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    reason = serializer.validated_data.get("reason", "").strip()
+    with transaction.atomic():
+        certificate = Certificate.objects.select_for_update().get(id=certificate.id)
+        if certificate.revoked_at is None:
+            certificate.revoked_at = timezone.now()
+            certificate.revoked_reason = reason or "Revoked by admin."
+            certificate.save(update_fields=["revoked_at", "revoked_reason", "updated_at"])
+            _create_certificate_audit_log(
+                certificate=certificate,
+                action=CertificateAuditLog.Action.REVOKED,
+                actor=request.user,
+                reason=certificate.revoked_reason,
+                meta={"course_id": certificate.course_id, "user_id": certificate.user_id},
+            )
+    ensure_certificate_signature(certificate)
+    return Response(
+        {
+            "detail": "Certificate revoked.",
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_reissue(request, certificate_id):
+    certificate = get_object_or_404(Certificate.objects.select_related("course", "user"), id=certificate_id)
+    serializer = AdminCertificateActionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    reason = serializer.validated_data.get("reason", "").strip()
+
+    with transaction.atomic():
+        certificate = Certificate.objects.select_for_update().get(id=certificate.id)
+        old_certificate_code = certificate.certificate_code
+        old_verification_code = certificate.verification_code
+
+        if certificate.certificate_pdf:
+            certificate.certificate_pdf.delete(save=False)
+        certificate.certificate_code = _new_certificate_code()
+        certificate.verification_code = ""
+        certificate.signed_payload = ""
+        certificate.certificate_pdf = ""
+        certificate.revoked_at = None
+        certificate.revoked_reason = ""
+        certificate.save(
+            update_fields=[
+                "certificate_code",
+                "verification_code",
+                "signed_payload",
+                "certificate_pdf",
+                "revoked_at",
+                "revoked_reason",
+                "updated_at",
+            ]
+        )
+        ensure_certificate_signature(certificate)
+        _create_certificate_audit_log(
+            certificate=certificate,
+            action=CertificateAuditLog.Action.REISSUED,
+            actor=request.user,
+            reason=reason or "Reissued by admin.",
+            meta={
+                "course_id": certificate.course_id,
+                "user_id": certificate.user_id,
+                "old_certificate_code": old_certificate_code,
+                "new_certificate_code": certificate.certificate_code,
+                "old_verification_code": old_verification_code,
+                "new_verification_code": certificate.verification_code,
+            },
+        )
+
+    _ensure_certificate_pdf(certificate, request=request)
+
+    return Response(
+        {
+            "detail": "Certificate reissued with new verification identity.",
+            "certificate": CertificateSerializer(certificate, context={"request": request}).data,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
+def admin_certificate_audit_logs(request):
+    logs = CertificateAuditLog.objects.select_related("certificate", "certificate__course", "certificate__user", "actor")
+    user_id = request.query_params.get("user_id")
+    course_id = request.query_params.get("course_id")
+    if user_id:
+        logs = logs.filter(certificate__user_id=user_id)
+    if course_id:
+        logs = logs.filter(certificate__course_id=course_id)
+    logs = logs.order_by("-created_at", "-id")[:200]
+    return Response(CertificateAuditLogSerializer(logs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def admin_student_wallet(request, user_id):
     user_model = get_user_model()
     student = get_object_or_404(user_model, id=user_id)
@@ -1829,6 +2366,9 @@ def admin_student_expel(request, user_id):
     profile = StudentProfile.objects.filter(user=student).first()
     if profile and profile.passport_photo:
         profile.passport_photo.delete(save=False)
+    for cert in Certificate.objects.filter(user=student).only("id", "certificate_pdf"):
+        if cert.certificate_pdf:
+            cert.certificate_pdf.delete(save=False)
 
     username = student.username
     student.delete()

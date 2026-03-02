@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAccessToken } from "@/hooks/use-access-token";
 import { getAccessToken } from "@/lib/auth";
-import { downloadCertificateTemplate } from "@/lib/certificate";
+import { downloadCertificatePdf, downloadCertificateTemplate } from "@/lib/certificate";
 
 type Lesson = {
   id: number;
@@ -36,12 +36,21 @@ type CourseDetail = {
 type ExamEligibility = {
   can_take_final_exam: boolean;
   final_exam_exists?: boolean;
+  profile_completed?: boolean;
+  final_exam_result?: {
+    attempted: boolean;
+    passed: boolean;
+    score: string | null;
+  };
   progress?: { completion_rate: number };
 };
 type CertificateResponse = {
   issued: boolean;
   certificate?: {
     certificate_code: string;
+    verification_code?: string;
+    verification_url?: string;
+    signed_payload?: string;
     issued_at: string;
   };
 };
@@ -62,6 +71,14 @@ export default function CourseDetailPage() {
   const [studentName, setStudentName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const toPublicVerifyUrl = (verificationCode?: string, fallbackUrl?: string) => {
+    if (verificationCode) {
+      if (typeof window === "undefined") return `/verify/${verificationCode}`;
+      return `${window.location.origin}/verify/${verificationCode}`;
+    }
+    if (!fallbackUrl) return "";
+    return fallbackUrl.replace("/api/verify/", "/verify/");
+  };
 
   const loadCourse = useCallback(async (token: string) => {
     try {
@@ -95,27 +112,47 @@ export default function CourseDetailPage() {
       setCertificate(null);
       return;
     }
-    Promise.all([
-      apiFetch<ExamEligibility>(`/courses/${course.id}/exam-eligibility/`, {}, accessToken),
-      apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, accessToken).catch(
-        () => ({ issued: false } as CertificateResponse),
-      ),
-    ])
-      .then(([eligibility, cert]) => {
+
+    const loadEligibilityAndCertificate = async () => {
+      try {
+        const eligibility = await apiFetch<ExamEligibility>(`/courses/${course.id}/exam-eligibility/`, {}, accessToken);
         setExamEligibility(eligibility);
+
+        const shouldFetchCertificate = Boolean(eligibility.final_exam_result?.passed) && Boolean(eligibility.profile_completed);
+        if (!shouldFetchCertificate) {
+          setCertificate({ issued: false });
+          return;
+        }
+
+        const cert = await apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, accessToken).catch(
+          () => ({ issued: false } as CertificateResponse),
+        );
         setCertificate(cert);
-      })
-      .catch(() => setExamEligibility(null));
+      } catch {
+        setExamEligibility(null);
+      }
+    };
+
+    void loadEligibilityAndCertificate();
   }, [course?.enrolled, course?.id, accessToken]);
 
-  const downloadCertificateFile = () => {
+  const downloadCertificateFile = async () => {
     if (!course || !certificate?.issued) return;
-    downloadCertificateTemplate({
-      courseTitle: course.title,
-      certificateCode: certificate.certificate?.certificate_code,
-      issuedAt: certificate.certificate?.issued_at,
-      studentName: studentName || "Student",
-    });
+    try {
+      await downloadCertificatePdf(course.id, accessToken);
+    } catch {
+      downloadCertificateTemplate({
+        courseTitle: course.title,
+        certificateCode: certificate.certificate?.certificate_code,
+        verificationCode: certificate.certificate?.verification_code,
+        verificationUrl: toPublicVerifyUrl(
+          certificate.certificate?.verification_code,
+          certificate.certificate?.verification_url,
+        ),
+        issuedAt: certificate.certificate?.issued_at,
+        studentName: studentName || "Student",
+      });
+    }
   };
 
   const enroll = async () => {
@@ -160,19 +197,24 @@ export default function CourseDetailPage() {
             </button>
           )}
           {course.enrolled && (
-            <p className="mt-5 inline-block rounded-lg border border-emerald-300 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-500">
-              Enrolled
-            </p>
+            <div className="mt-5 flex justify-center md:justify-start">
+              <p className="inline-block rounded-lg border border-emerald-300 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-500">
+                Enrolled
+              </p>
+            </div>
           )}
           {course.enrolled && certificate?.issued ? (
-            <div className="mt-4">
-              <button type="button" className="btn btn-primary" onClick={downloadCertificateFile}>
+            <div className="mt-4 flex flex-wrap justify-center gap-2 md:justify-start">
+              <Link href={`/certificates/${course.id}`} className="btn btn-secondary w-full sm:w-auto">
+                View Certification
+              </Link>
+              <button type="button" className="btn btn-primary w-full sm:w-auto" onClick={downloadCertificateFile}>
                 Download Certificate
               </button>
             </div>
           ) : course.enrolled && examEligibility?.can_take_final_exam && (
-            <div className="mt-4">
-              <Link href={`/final-exam/${course.id}`} className="btn btn-primary">
+            <div className="mt-4 flex justify-center md:justify-start">
+              <Link href={`/final-exam/${course.id}`} className="btn btn-primary w-full sm:w-auto">
                 Take Final Exam
               </Link>
             </div>

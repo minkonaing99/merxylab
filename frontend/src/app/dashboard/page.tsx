@@ -186,7 +186,7 @@ export default function DashboardPage() {
         <h2 className="mb-3 text-xl font-semibold">Enrolled Courses</h2>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {enrollments.map((entry) => (
-            <article key={entry.id} className="surface p-5 transition-transform duration-200 hover:-translate-y-1">
+            <article key={entry.id} className="surface flex h-full flex-col p-5 transition-transform duration-200 hover:-translate-y-1">
               {(() => {
                 const progress = courseProgress[entry.course.id];
                 const isComplete = (progress?.completion_rate ?? 0) >= 100;
@@ -216,58 +216,58 @@ export default function DashboardPage() {
                       ? "Unpublished for now."
                       : "";
                 return (
-                  <>
+                  <div className="flex min-h-0 flex-1 flex-col">
                     <p className="text-xs uppercase tracking-wide muted">
                       {!isCourseAvailable ? "UNAVAILABLE" : isComplete ? "COMPLETE" : entry.status}
                     </p>
-              <h3 className="mt-1 text-lg font-semibold">{entry.course.title}</h3>
-              <p className="mt-2 text-sm muted">{entry.course.description}</p>
+                    <h3 className="mt-1 text-lg font-semibold">{entry.course.title}</h3>
+                    <p className="mt-2 min-h-12 text-sm muted">{entry.course.description}</p>
                     {!isCourseAvailable && (
                       <p className="mt-2 rounded-md border border-amber-300 bg-amber-500/10 px-2 py-1 text-xs text-amber-700">
                         {unavailableReason}
                       </p>
                     )}
-              <div className="mt-3">
-                <div className="mb-1 flex items-center justify-between text-xs muted">
-                  <span>Progress</span>
+                    <div className="mt-3">
+                      <div className="mb-1 flex items-center justify-between text-xs muted">
+                        <span>Progress</span>
                         <span>{progress?.completion_rate ?? 0}%</span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: "color-mix(in srgb, var(--border) 70%, transparent)" }}>
-                  <div
-                    className="h-full transition-all"
+                      </div>
+                      <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: "color-mix(in srgb, var(--border) 70%, transparent)" }}>
+                        <div
+                          className="h-full transition-all"
                           style={{ width: `${progress?.completion_rate ?? 0}%`, background: "var(--accent)" }}
-                  />
-                </div>
-                <p className="mt-1 text-xs muted">
+                        />
+                      </div>
+                      <p className="mt-1 text-xs muted">
                         {(progress?.completed_lessons ?? 0)}/{(progress?.total_lessons ?? 0)} lessons completed
-                </p>
-              </div>
+                      </p>
+                    </div>
                     <div className="mt-4 flex items-center gap-2">
                       {isCourseAvailable ? (
                         <Link
                           href={`/courses/${entry.course.slug}`}
-                          className="btn btn-primary"
+                          className="btn btn-primary min-w-20"
                         >
                           {isComplete ? "View" : "Continue"}
                         </Link>
                       ) : (
-                        <button type="button" className="btn btn-secondary cursor-not-allowed opacity-70" disabled>
+                        <button type="button" className="btn btn-secondary min-w-20 cursor-not-allowed opacity-70" disabled>
                           Unpublished
                         </button>
                       )}
                       {isCourseAvailable && canTakeExam && (
                         examPassed ? (
-                          <span className="btn btn-secondary pointer-events-none">
+                          <span className="inline-flex h-10 items-center rounded-lg border px-4 text-sm font-semibold" style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--foreground)" }}>
                             Score: {progress?.final_exam_score ?? "-"}%
                           </span>
                         ) : (
-                          <Link href={`/final-exam/${entry.course.id}`} className="btn btn-secondary">
+                          <Link href={`/final-exam/${entry.course.id}`} className="btn btn-secondary min-w-20">
                             Take Exam
                           </Link>
                         )
                       )}
                     </div>
-                  </>
+                  </div>
                 );
               })()}
             </article>

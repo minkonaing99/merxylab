@@ -1,10 +1,13 @@
 import re
 from datetime import date
 
+from django.conf import settings
 from rest_framework import serializers
 
 from core.models import (
     Certificate,
+    CertificateAuditLog,
+    CertificateVerificationLog,
     Course,
     CreditTransaction,
     CreditWallet,
@@ -508,10 +511,26 @@ class FinalExamAttemptSerializer(serializers.ModelSerializer):
 class CertificateSerializer(serializers.ModelSerializer):
     course_id = serializers.IntegerField(source="course.id", read_only=True)
     exam_attempt_id = serializers.IntegerField(source="exam_attempt.id", read_only=True)
+    verification_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Certificate
-        fields = ["id", "course_id", "exam_attempt_id", "issued_at", "certificate_code"]
+        fields = [
+            "id",
+            "course_id",
+            "exam_attempt_id",
+            "issued_at",
+            "certificate_code",
+            "verification_code",
+            "verification_url",
+            "signed_payload",
+            "signature_version",
+            "revoked_at",
+            "revoked_reason",
+        ]
+
+    def get_verification_url(self, obj):
+        return f"{settings.FRONTEND_BASE_URL}/verify/{obj.verification_code}"
 
 
 class CreditTransactionSerializer(serializers.ModelSerializer):
@@ -559,3 +578,37 @@ class AdminStudentListRowSerializer(serializers.Serializer):
     credits = serializers.IntegerField()
     enrollments = serializers.IntegerField()
     owned_courses = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class CertificateAuditLogSerializer(serializers.ModelSerializer):
+    actor_username = serializers.CharField(source="actor.username", read_only=True)
+
+    class Meta:
+        model = CertificateAuditLog
+        fields = ["id", "action", "reason", "actor", "actor_username", "meta", "created_at"]
+
+
+class AdminCertificateActionSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class CertificateVerificationLogSerializer(serializers.ModelSerializer):
+    certificate_code = serializers.CharField(source="certificate.certificate_code", read_only=True)
+    course_title = serializers.CharField(source="certificate.course.title", read_only=True)
+    student_username = serializers.CharField(source="certificate.user.username", read_only=True)
+
+    class Meta:
+        model = CertificateVerificationLog
+        fields = [
+            "id",
+            "verification_code",
+            "status",
+            "detail",
+            "ip_address",
+            "user_agent",
+            "certificate",
+            "certificate_code",
+            "course_title",
+            "student_username",
+            "created_at",
+        ]

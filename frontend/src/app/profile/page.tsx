@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import { useAccessToken } from "@/hooks/use-access-token";
-import { downloadCertificateTemplate } from "@/lib/certificate";
+import { downloadCertificatePdf, downloadCertificateTemplate } from "@/lib/certificate";
 
 type ProfilePayload = {
   full_name: string;
@@ -31,6 +31,12 @@ type Eligibility = {
   course_id: number;
   can_take_final_exam: boolean;
   certificate_ready: boolean;
+  profile_completed?: boolean;
+  final_exam_result?: {
+    attempted: boolean;
+    passed: boolean;
+    score: string | null;
+  };
   progress: {
     completion_rate: number;
     completed_lessons: number;
@@ -41,6 +47,9 @@ type CertificateResponse = {
   issued: boolean;
   certificate?: {
     certificate_code: string;
+    verification_code?: string;
+    verification_url?: string;
+    signed_payload?: string;
     issued_at: string;
   };
 };
@@ -48,6 +57,9 @@ type EligibilityRow = Eligibility & {
   course_title: string;
   certificate_issued: boolean;
   certificate_code?: string;
+  verification_code?: string;
+  verification_url?: string;
+  signed_payload?: string;
   certificate_issued_at?: string;
 };
 
@@ -75,6 +87,7 @@ export default function ProfilePage() {
   const router = useRouter();
   const pathname = usePathname();
   const accessToken = useAccessToken();
+  const [hydrated, setHydrated] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [passportPhoto, setPassportPhoto] = useState<File | null>(null);
   const [passportPhotoUrl, setPassportPhotoUrl] = useState("");
@@ -88,6 +101,14 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const toPublicVerifyUrl = (verificationCode?: string, fallbackUrl?: string) => {
+    if (verificationCode) {
+      if (typeof window === "undefined") return `/verify/${verificationCode}`;
+      return `${window.location.origin}/verify/${verificationCode}`;
+    }
+    if (!fallbackUrl) return "";
+    return fallbackUrl.replace("/api/verify/", "/verify/");
+  };
   const minDobIso = useMemo(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 13);
@@ -118,7 +139,12 @@ export default function ProfilePage() {
   );
 
   useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
     const token = accessToken || getAccessToken();
+    if (!hydrated) return;
     if (!token) {
       router.replace(`/login?next=${encodeURIComponent(pathname)}`);
       return;
@@ -157,17 +183,21 @@ export default function ProfilePage() {
         const eligibilityResults = await Promise.all(
           activeCourses.map(async (course) => {
             try {
-              const [row, cert] = await Promise.all([
-                apiFetch<Eligibility>(`/courses/${course.id}/exam-eligibility/`, {}, token),
-                apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, token).catch(
-                  () => ({ issued: false } as CertificateResponse),
-                ),
-              ]);
+              const row = await apiFetch<Eligibility>(`/courses/${course.id}/exam-eligibility/`, {}, token);
+              const shouldFetchCertificate = Boolean(row.final_exam_result?.passed) && Boolean(row.profile_completed);
+              const cert = shouldFetchCertificate
+                ? await apiFetch<CertificateResponse>(`/courses/${course.id}/certificate/`, {}, token).catch(
+                    () => ({ issued: false } as CertificateResponse),
+                  )
+                : ({ issued: false } as CertificateResponse);
               return {
                 ...row,
                 course_title: course.title,
                 certificate_issued: Boolean(cert.issued),
                 certificate_code: cert.certificate?.certificate_code,
+                verification_code: cert.certificate?.verification_code,
+                verification_url: cert.certificate?.verification_url,
+                signed_payload: cert.certificate?.signed_payload,
                 certificate_issued_at: cert.certificate?.issued_at,
               };
             } catch {
@@ -186,7 +216,7 @@ export default function ProfilePage() {
     };
 
     void load();
-  }, [accessToken, pathname, router]);
+  }, [accessToken, hydrated, pathname, router]);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -234,6 +264,10 @@ export default function ProfilePage() {
       setSaving(false);
     }
   };
+
+  if (!hydrated) {
+    return <main className="page-wrap">Loading profile...</main>;
+  }
 
   if (!accessToken && !getAccessToken()) {
     return <main className="page-wrap">Redirecting to login...</main>;
@@ -357,7 +391,7 @@ export default function ProfilePage() {
                       Progress: {row.progress.completed_lessons}/{row.progress.total_lessons} ({row.progress.completion_rate}%)
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <div className="flex w-full flex-wrap items-center justify-center gap-2 text-xs sm:w-auto sm:justify-end">
                     {!row.certificate_issued && (
                       <span className={`inline-flex h-9 items-center rounded-full border px-3 ${row.can_take_final_exam ? "border-emerald-300 bg-emerald-500/10 text-emerald-500" : "border-slate-300 bg-slate-500/10 muted"}`}>
                         {row.can_take_final_exam ? "Exam Unlocked" : "Exam Locked"}
@@ -368,26 +402,47 @@ export default function ProfilePage() {
                         {row.certificate_ready ? "Certificate Ready" : "Certificate Pending"}
                       </span>
                     )}
+                    {!row.certificate_issued && row.final_exam_result?.passed && (
+                      <span className="inline-flex h-9 items-center rounded-full border border-emerald-300 bg-emerald-500/10 px-3 text-emerald-600">
+                        Final Exam Passed
+                      </span>
+                    )}
                     {row.certificate_issued ? (
+                      <div className="flex w-full flex-wrap justify-center gap-2 sm:w-auto sm:justify-end">
+                        <button
+                          type="button"
+                          className="btn btn-secondary h-9 w-full px-3 sm:w-auto"
+                          onClick={() => router.push(`/certificates/${row.course_id}`)}
+                        >
+                          View Certification
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-primary h-9 w-full px-3 sm:w-auto"
+                          onClick={async () => {
+                            try {
+                              await downloadCertificatePdf(row.course_id, accessToken);
+                              setNotice("Certificate PDF downloaded.");
+                            } catch {
+                              downloadCertificateTemplate({
+                                courseTitle: row.course_title,
+                                certificateCode: row.certificate_code,
+                                verificationCode: row.verification_code,
+                                verificationUrl: toPublicVerifyUrl(row.verification_code, row.verification_url),
+                                issuedAt: row.certificate_issued_at,
+                                studentName: form.full_name || "Student",
+                              });
+                              setNotice("Certificate HTML downloaded.");
+                            }
+                          }}
+                        >
+                          Download Certificate
+                        </button>
+                      </div>
+                    ) : row.can_take_final_exam && !row.final_exam_result?.passed && (
                       <button
                         type="button"
-                        className="btn btn-primary h-9 px-3"
-                        onClick={() => {
-                          downloadCertificateTemplate({
-                            courseTitle: row.course_title,
-                            certificateCode: row.certificate_code,
-                            issuedAt: row.certificate_issued_at,
-                            studentName: form.full_name || "Student",
-                          });
-                          setNotice("Certificate downloaded.");
-                        }}
-                      >
-                        Download Certificate
-                      </button>
-                    ) : row.can_take_final_exam && (
-                      <button
-                        type="button"
-                        className="btn btn-primary px-3 py-1"
+                        className="btn btn-primary w-full px-3 py-1 sm:w-auto"
                         onClick={() => router.push(`/final-exam/${row.course_id}`)}
                       >
                         Take Final Exam
