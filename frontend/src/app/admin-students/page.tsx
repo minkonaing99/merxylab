@@ -202,7 +202,7 @@ export default function AdminStudentsPage() {
                 <img
                   src={studentProfile.profile.passport_photo_url}
                   alt="Passport"
-                  className="mt-2 max-h-80 rounded border"
+                  className="mt-2 max-h-80 w-full max-w-md rounded border object-contain"
                 />
               ) : (
                 <p className="mt-2 text-xs muted">No passport photo uploaded.</p>
@@ -216,7 +216,7 @@ export default function AdminStudentsPage() {
                   value={reviewNote}
                   onChange={(e) => setReviewNote(e.target.value)}
                 />
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row">
                   <button type="button" className="btn btn-primary" disabled={loading} onClick={() => reviewProfile("approve")}>
                     Approve
                   </button>
@@ -239,7 +239,51 @@ export default function AdminStudentsPage() {
       <section className="mt-6 grid gap-4 lg:grid-cols-2">
         <div className="surface p-5">
           <h2 className="text-lg font-semibold">Students</h2>
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3 grid gap-3 md:hidden">
+            {students.map((student) => (
+              <article key={student.user_id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{student.username}</p>
+                    <p className="text-xs muted">{student.email || "no email"}</p>
+                    {student.full_name && <p className="text-xs muted">{student.full_name}</p>}
+                  </div>
+                  <span className={`rounded-full px-2 py-0.5 text-xs ${
+                    student.verification_status === "VERIFIED"
+                      ? "bg-emerald-100 text-emerald-700"
+                      : student.verification_status === "REJECTED"
+                        ? "bg-red-100 text-red-700"
+                        : "bg-amber-100 text-amber-700"
+                  }`}>
+                    {student.verification_status || "PENDING"}
+                  </span>
+                </div>
+                <div className="mt-2 text-sm">
+                  <p><strong>Credits:</strong> {student.credits}</p>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {(student.owned_courses ?? []).slice(0, 3).map((course) => (
+                    <span key={course} className="rounded-full bg-white px-2 py-0.5 text-xs">
+                      {course}
+                    </span>
+                  ))}
+                  {(student.owned_courses ?? []).length === 0 && <span className="text-xs muted">No owned courses</span>}
+                  {(student.owned_courses ?? []).length > 3 && (
+                    <span className="text-xs muted">+{(student.owned_courses ?? []).length - 3} more</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary mt-3 w-full px-3 py-1 text-xs"
+                  onClick={() => setSelectedStudentId(student.user_id)}
+                >
+                  Manage
+                </button>
+              </article>
+            ))}
+            {students.length === 0 && <p className="text-sm muted">No students found.</p>}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto md:block">
             <table className="min-w-full text-left text-sm">
               <thead className="border-b text-slate-600">
                 <tr>
@@ -309,9 +353,10 @@ export default function AdminStudentsPage() {
           {!walletDetail && <p className="mt-3 text-sm muted">Select a student from the left table.</p>}
           {walletDetail && (
             <>
-              <p className="mt-2 text-sm">
-                Student: <strong>{walletDetail.student.username}</strong> | Balance: <strong>{walletDetail.wallet.balance_credits}</strong>
-              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                <p>Student: <strong>{walletDetail.student.username}</strong></p>
+                <p>Balance: <strong>{walletDetail.wallet.balance_credits}</strong></p>
+              </div>
               <form onSubmit={adjustCredits} className="mt-3 grid gap-2">
                 <input
                   type="number"
@@ -356,8 +401,8 @@ export default function AdminStudentsPage() {
               <div className="mt-2 max-h-40 overflow-y-auto rounded border border-slate-200 p-2">
                 <ul className="space-y-1 text-sm">
                   {walletDetail.enrollments.map((enrollment) => (
-                    <li key={enrollment.id} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
-                      <span>{enrollment.course.title}</span>
+                    <li key={enrollment.id} className="flex items-start justify-between gap-2 rounded bg-slate-50 px-2 py-1">
+                      <span className="min-w-0 flex-1 break-words">{enrollment.course.title}</span>
                       <span className="text-xs muted">{enrollment.status}</span>
                     </li>
                   ))}

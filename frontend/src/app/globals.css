@@ -121,6 +121,10 @@ body::before {
   background: var(--surface-soft);
 }
 
+[data-theme="dark"] .theme-icon {
+  filter: brightness(0) invert(1);
+}
+
 .btn-danger {
   background: var(--danger);
   color: white;
@@ -178,7 +182,12 @@ body::before {
 @media (prefers-reduced-motion: reduce) {
   .fade-up,
   .fade-up-delay,
-  .soft-pulse {
+  .soft-pulse,
+  .slow-float {
+    animation: none !important;
+  }
+
+  .home-hero::after {
     animation: none !important;
   }
 }
@@ -214,4 +223,54 @@ body::before {
 
 .admin-theme-scope .text-slate-900 {
   color: var(--foreground) !important;
+}
+
+.home-hero {
+  position: relative;
+  isolation: isolate;
+}
+
+.home-hero::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  width: 340px;
+  height: 340px;
+  right: -90px;
+  top: -120px;
+  border-radius: 9999px;
+  background: radial-gradient(circle at center, color-mix(in srgb, var(--accent) 26%, transparent), transparent 68%);
+  filter: blur(4px);
+  animation: heroDrift 8s ease-in-out infinite;
+}
+
+.card-lift {
+  transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.card-lift:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 14px 30px -24px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.slow-float {
+  animation: slowFloat 6s ease-in-out infinite;
+}
+
+@keyframes heroDrift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-12px, 10px, 0) scale(1.04);
+  }
+}
+
+@keyframes slowFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
 }
