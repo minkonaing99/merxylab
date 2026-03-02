@@ -306,6 +306,11 @@ def _is_profile_completed(profile):
     return all(flags.values()) and profile.verification_status == StudentProfile.VerificationStatus.VERIFIED
 
 
+def _is_profile_verified(user):
+    profile, _ = StudentProfile.objects.get_or_create(user=user)
+    return profile.verification_status == StudentProfile.VerificationStatus.VERIFIED
+
+
 def _wallet_for_user(user):
     wallet, _ = CreditWallet.objects.get_or_create(user=user, defaults={"balance_credits": 0})
     return wallet
@@ -1254,7 +1259,8 @@ def submit_course_final_exam(request, course_id):
         FinalExamSession.objects.filter(user=request.user, exam=exam).delete()
         certificate = None
         certificate_created = False
-        if passed:
+        profile_verified = _is_profile_verified(request.user)
+        if passed and profile_verified:
             certificate, certificate_created = Certificate.objects.get_or_create(
                 user=request.user,
                 course=course,
@@ -1282,11 +1288,13 @@ def submit_course_final_exam(request, course_id):
         "correct_answers": correct_count,
         "passing_score": int(exam.passing_score),
     }
-    payload["certificate_issued"] = bool(passed)
-    payload["certificate_created"] = bool(certificate_created) if passed else False
+    payload["certificate_issued"] = bool(passed and certificate is not None)
+    payload["certificate_created"] = bool(certificate_created) if passed and certificate is not None else False
     payload["certificate"] = (
         CertificateSerializer(certificate, context={"request": request}).data if passed and certificate else None
     )
+    if passed and certificate is None:
+        payload["certificate_blocked_reason"] = "Profile must be verified before certificate issuance."
     payload["charged_credits"] = charged_credits
     return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -1312,6 +1320,11 @@ def my_course_certificate(request, course_id):
     _assert_course_live(course)
     if not _is_enrolled(request.user, course):
         return Response({"detail": "Enrollment required."}, status=status.HTTP_403_FORBIDDEN)
+    if not _is_profile_verified(request.user):
+        return Response(
+            {"detail": "Profile verification is required before certificate access."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
     certificate = Certificate.objects.filter(user=request.user, course=course).select_related("exam_attempt").first()
     if certificate is None:
         return Response({"issued": False, "detail": "Certificate not issued yet."}, status=status.HTTP_404_NOT_FOUND)

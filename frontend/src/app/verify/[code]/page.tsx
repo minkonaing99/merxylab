@@ -89,12 +89,6 @@ export default function VerifyCertificatePage() {
                 <p className="muted">Issued At</p>
                 <p className="font-medium">{new Date(payload.certificate.issued_at).toLocaleString()}</p>
               </div>
-              <div className="surface-soft p-3 md:col-span-2">
-                <p className="muted">Signed Payload (v{payload.certificate.signature_version})</p>
-                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-all rounded border border-slate-200 bg-slate-50 p-2 text-xs">
-                  {payload.certificate.signed_payload}
-                </pre>
-              </div>
             </div>
           )}
         </section>

@@ -19,6 +19,7 @@ from core.models import (
     FinalExamSession,
     Lesson,
     QuizAttempt,
+    StudentProfile,
     UserLessonProgress,
     CertificateVerificationLog,
 )
@@ -29,6 +30,11 @@ class CoreApiFlowTests(APITransactionTestCase):
     def setUp(self):
         self.user_model = get_user_model()
         self.student = self.user_model.objects.create_user(username="student_test", password="student12345")
+        StudentProfile.objects.create(
+            user=self.student,
+            full_name="Student Test",
+            verification_status=StudentProfile.VerificationStatus.VERIFIED,
+        )
         self.admin = self.user_model.objects.create_superuser(
             username="admin_test",
             email="admin_test@local.dev",
@@ -551,6 +557,53 @@ class CoreApiFlowTests(APITransactionTestCase):
         verify = self.client.get(f"/api/verify/{payload.data['certificate']['verification_code']}/")
         self.assertEqual(verify.status_code, 200)
         self.assertTrue(verify.data["valid"])
+
+    def test_certificate_not_issued_when_profile_not_verified(self):
+        profile = StudentProfile.objects.get(user=self.student)
+        profile.verification_status = StudentProfile.VerificationStatus.PENDING
+        profile.save(update_fields=["verification_status", "updated_at"])
+
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+        exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+        qid = exam_payload.data["questions"][0]["id"]
+        correct_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=True).id
+        submit = self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": [{"question_id": qid, "choice_id": correct_choice}]},
+            format="json",
+        )
+        self.assertEqual(submit.status_code, 201)
+        self.assertTrue(submit.data["passed"])
+        self.assertFalse(submit.data["certificate_issued"])
+        self.assertIn("certificate_blocked_reason", submit.data)
+        self.assertEqual(Certificate.objects.filter(user=self.student, course=self.course).count(), 0)
+
+    def test_certificate_view_forbidden_when_profile_not_verified(self):
+        profile = StudentProfile.objects.get(user=self.student)
+        profile.verification_status = StudentProfile.VerificationStatus.PENDING
+        profile.save(update_fields=["verification_status", "updated_at"])
+
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        blocked = self.client.get(f"/api/courses/{self.course.id}/certificate/")
+        self.assertEqual(blocked.status_code, 403)
+        self.assertIn("verification", blocked.data["detail"].lower())
 
     def test_final_exam_submit_with_blank_answers_counts_as_fail(self):
         self.auth_as_student()

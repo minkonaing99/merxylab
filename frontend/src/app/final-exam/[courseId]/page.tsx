@@ -27,6 +27,7 @@ type SubmitResult = {
   summary: { total_questions: number; correct_answers: number; passing_score: number };
   certificate_issued: boolean;
   certificate_created: boolean;
+  certificate_blocked_reason?: string;
   charged_credits?: number;
   certificate: { certificate_code: string; issued_at: string } | null;
 };
@@ -340,6 +341,11 @@ export default function CourseFinalExamPage() {
               <p className="muted">Issued at: {new Date(result.certificate.issued_at).toLocaleString()}</p>
             </div>
           )}
+          {result.passed && !result.certificate && result.certificate_blocked_reason && (
+            <div className="mt-4 rounded-lg border border-amber-300 bg-amber-500/10 p-3 text-sm text-amber-700">
+              {result.certificate_blocked_reason}
+            </div>
+          )}
           <div className="mt-4 flex gap-2">
             {!result.passed && (
               <button
@@ -352,6 +358,15 @@ export default function CourseFinalExamPage() {
                 }}
               >
                 Retry Final Exam
+              </button>
+            )}
+            {result.passed && result.certificate && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => router.push(`/certificates/${courseId}`)}
+              >
+                View Certification
               </button>
             )}
             <button type="button" className="btn btn-secondary" onClick={() => router.push("/profile")}>

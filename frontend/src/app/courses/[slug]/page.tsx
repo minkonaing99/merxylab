@@ -65,6 +65,14 @@ export default function CourseDetailPage() {
   const [studentName, setStudentName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const toPublicVerifyUrl = (verificationCode?: string, fallbackUrl?: string) => {
+    if (verificationCode) {
+      if (typeof window === "undefined") return `/verify/${verificationCode}`;
+      return `${window.location.origin}/verify/${verificationCode}`;
+    }
+    if (!fallbackUrl) return "";
+    return fallbackUrl.replace("/api/verify/", "/verify/");
+  };
 
   const loadCourse = useCallback(async (token: string) => {
     try {
@@ -117,8 +125,10 @@ export default function CourseDetailPage() {
       courseTitle: course.title,
       certificateCode: certificate.certificate?.certificate_code,
       verificationCode: certificate.certificate?.verification_code,
-      verificationUrl: certificate.certificate?.verification_url,
-      signedPayload: certificate.certificate?.signed_payload,
+      verificationUrl: toPublicVerifyUrl(
+        certificate.certificate?.verification_code,
+        certificate.certificate?.verification_url,
+      ),
       issuedAt: certificate.certificate?.issued_at,
       studentName: studentName || "Student",
     });
@@ -171,7 +181,10 @@ export default function CourseDetailPage() {
             </p>
           )}
           {course.enrolled && certificate?.issued ? (
-            <div className="mt-4">
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Link href={`/certificates/${course.id}`} className="btn btn-secondary">
+                View Certification
+              </Link>
               <button type="button" className="btn btn-primary" onClick={downloadCertificateFile}>
                 Download Certificate
               </button>
