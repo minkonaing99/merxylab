@@ -20,8 +20,11 @@ ssh -i your-key.pem ubuntu@YOUR_EC2_PUBLIC_IP
 
 ```bash
 sudo apt update
-sudo apt install -y docker.io docker-compose-v2 git curl python3-venv python3-pip ffmpeg nginx
+sudo apt install -y docker.io docker-compose-v2 git curl python3-venv python3-pip ffmpeg nginx redis-server certbot python3-certbot-nginx
+# Fallback if docker-compose-v2 package is unavailable on your Ubuntu image:
+sudo apt install -y docker-compose-plugin || true
 sudo systemctl enable --now docker
+sudo systemctl enable --now redis-server
 sudo usermod -aG docker $USER
 newgrp docker
 ```
@@ -32,6 +35,8 @@ Verify:
 docker --version
 docker compose version
 python3 --version
+redis-cli ping
+nginx -v
 ```
 
 ## 4. Clone project
@@ -40,7 +45,7 @@ python3 --version
 cd ~
 git clone https://github.com/minkonaing99/merxylab.git
 cd merxylab
-git checkout v1.0.6
+git checkout v1.1.0
 ```
 
 ## 5. Backend environment (`backend/.env`)
@@ -79,6 +84,29 @@ FFPROBE_BIN=
 QUIZ_FAIL_LIMIT_PER_DAY=3
 QUIZ_FAIL_COOLDOWN_MINUTES=30
 FINAL_EXAM_RETRY_FEE_CREDITS=50
+AUTH_LOGIN_IP_RATE_LIMIT=25
+AUTH_LOGIN_IP_RATE_WINDOW_SECONDS=300
+AUTH_LOGIN_IP_RATE_LOCK_SECONDS=900
+AUTH_LOGIN_USER_RATE_LIMIT=8
+AUTH_LOGIN_USER_RATE_WINDOW_SECONDS=300
+AUTH_LOGIN_USER_RATE_LOCK_SECONDS=900
+AUTH_REGISTER_IP_RATE_LIMIT=10
+AUTH_REGISTER_IP_RATE_WINDOW_SECONDS=3600
+AUTH_REGISTER_IP_RATE_LOCK_SECONDS=3600
+EXAM_SUBMIT_RATE_LIMIT=30
+EXAM_SUBMIT_RATE_WINDOW_SECONDS=600
+EXAM_SUBMIT_RATE_LOCK_SECONDS=1800
+QUIZ_SUBMIT_RATE_LIMIT=50
+QUIZ_SUBMIT_RATE_WINDOW_SECONDS=600
+QUIZ_SUBMIT_RATE_LOCK_SECONDS=900
+
+CELERY_BROKER_URL=redis://127.0.0.1:6379/0
+CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/0
+CELERY_TASK_TIME_LIMIT=7500
+CELERY_TASK_SOFT_TIME_LIMIT=7200
+VIDEO_TRANSCODE_MAX_ATTEMPTS=3
+VIDEO_TRANSCODE_RETRY_BASE_SECONDS=45
+VIDEO_TRANSCODE_TIMEOUT_SECONDS=7200
 
 SESSION_COOKIE_SECURE=true
 CSRF_COOKIE_SECURE=true
@@ -131,6 +159,7 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 pip install gunicorn
 python backend/manage.py migrate
+python backend/manage.py collectstatic --noinput
 python backend/manage.py createsuperuser
 deactivate
 ```
@@ -175,7 +204,29 @@ WantedBy=multi-user.target
 EOF
 ```
 
-## 12. Create systemd service: frontend (next start)
+## 12. Create systemd service: Celery worker (async video pipeline)
+
+```bash
+sudo tee /etc/systemd/system/merxylab-celery.service > /dev/null << 'EOF'
+[Unit]
+Description=MerxyLab Celery Worker
+After=network.target redis-server.service
+
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=/home/ubuntu/merxylab/backend
+EnvironmentFile=/home/ubuntu/merxylab/backend/.env
+ExecStart=/home/ubuntu/merxylab/.venv/bin/python -m celery -A config worker -l info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+## 13. Create systemd service: frontend (next start)
 
 ```bash
 sudo tee /etc/systemd/system/merxylab-frontend.service > /dev/null << 'EOF'
@@ -203,10 +254,11 @@ Enable/start services:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now merxylab-backend
+sudo systemctl enable --now merxylab-celery
 sudo systemctl enable --now merxylab-frontend
 ```
 
-## 13. Nginx config (domain + reverse proxy)
+## 14. Nginx config (domain + reverse proxy)
 
 ```bash
 sudo tee /etc/nginx/sites-available/merxylab > /dev/null << 'EOF'
@@ -247,6 +299,12 @@ server {
         proxy_read_timeout 900;
     }
 
+    location /static/ {
+        alias /home/ubuntu/merxylab/backend/staticfiles/;
+        expires 30d;
+        access_log off;
+    }
+
     location /admin/ {
         proxy_pass http://127.0.0.1:8000/admin/;
         proxy_set_header Host $host;
@@ -277,7 +335,7 @@ sudo systemctl restart nginx
 sudo systemctl enable nginx
 ```
 
-## 14. DNS in Route53
+## 15. DNS in Route53
 
 - Create/confirm `A` record: `teaching.merxy.club` -> your EC2 Elastic IP.
 
@@ -287,10 +345,9 @@ Check:
 dig +short teaching.merxy.club
 ```
 
-## 15. SSL with Let’s Encrypt
+## 16. SSL with Let's Encrypt
 
 ```bash
-sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d teaching.merxy.club
 ```
 
@@ -300,18 +357,19 @@ Test renewal:
 sudo certbot renew --dry-run
 ```
 
-## 16. Final health checks
+## 17. Final health checks
 
 ```bash
 curl https://teaching.merxy.club/api/health/
 curl -I https://teaching.merxy.club
+sudo systemctl status merxylab-celery --no-pager
 ```
 
 Browser:
 - `https://teaching.merxy.club`
 - `https://teaching.merxy.club/api/health/`
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 ### A. Home page shows `API: http://localhost:8000/api`
 Cause: wrong env key or stale build.
@@ -346,32 +404,63 @@ npm run build
 sudo systemctl restart merxylab-frontend
 ```
 
+### C.1 Django admin has no CSS/static files
+Cause: `collectstatic` was not run or Nginx has no `/static/` location.
+
+Fix:
+
+```bash
+cd ~/merxylab
+source .venv/bin/activate
+python backend/manage.py collectstatic --noinput
+deactivate
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
 ### D. View logs quickly
 
 ```bash
 sudo systemctl status merxylab-backend --no-pager
+sudo systemctl status merxylab-celery --no-pager
 sudo systemctl status merxylab-frontend --no-pager
 sudo systemctl status nginx --no-pager
 sudo journalctl -u merxylab-backend -n 120 --no-pager
+sudo journalctl -u merxylab-celery -n 120 --no-pager
 sudo journalctl -u merxylab-frontend -n 120 --no-pager
 ```
 
-### E. Video upload fails (`500`) or transcode times out
-Cause: ffmpeg transcode takes longer than Gunicorn worker timeout.
+### E. Video upload fails with `Failed to queue transcoding job` or `500`
+Cause:
+- `celery` package missing
+- Redis is not running
+- `merxylab-celery` worker is down
+- ffmpeg missing
 
 Fix:
 
-1. Ensure backend service uses `--timeout 900`.
-2. Ensure Nginx has:
-   - `client_max_body_size 2G;`
-   - `proxy_read_timeout 900;`
-   - `proxy_send_timeout 900;`
-3. Add dedicated upload location:
-   - `location /api/admin/upload-video/ { ... }`
-   - `proxy_request_buffering off;`
-   - `proxy_buffering off;`
-   - `proxy_read_timeout 3600;`
-   - `proxy_send_timeout 3600;`
+1. Ensure dependencies are installed:
+
+```bash
+source ~/merxylab/.venv/bin/activate
+pip install -r ~/merxylab/backend/requirements.txt
+deactivate
+```
+
+2. Ensure Redis is up:
+
+```bash
+redis-cli ping
+sudo systemctl status redis-server --no-pager
+```
+
+3. Ensure Celery worker is running:
+
+```bash
+sudo systemctl status merxylab-celery --no-pager
+sudo journalctl -u merxylab-celery -n 120 --no-pager
+```
+
 4. Ensure ffmpeg exists:
 
 ```bash
@@ -393,6 +482,7 @@ chown -R ubuntu:www-data media
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart merxylab-backend
+sudo systemctl restart merxylab-celery
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -401,3 +491,20 @@ sudo systemctl reload nginx
    - `https://teaching.merxy.club/admin-ui`
 
 Note: `curl http://127.0.0.1/api/...` may return `404` because Nginx server block is domain-based (`server_name teaching.merxy.club`).
+
+### F. Login returns `401 Unauthorized`
+Cause:
+- wrong username/password
+- temporary lockout from auth rate-limit policy
+
+Fix:
+- retry with correct credentials
+- wait lockout window if too many failed attempts
+
+### G. Final exam status in Admin UI
+Behavior:
+- `/api/admin/courses/{id}/final-exam/` now returns `200` with `exists: false` when final exam is not configured yet.
+- This is expected and prevents noisy `404` console errors.
+
+What to do:
+- create final exam in Admin UI Step 5 and publish it.

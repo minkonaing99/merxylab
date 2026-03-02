@@ -915,9 +915,22 @@ def admin_course_final_exam(request, course_id):
 
     if request.method == "GET":
         if exam is None:
-            return Response({"detail": "Final exam not configured."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "exists": False,
+                    "course_id": course.id,
+                    "title": "Final Exam",
+                    "passing_score": 70,
+                    "time_limit_sec": None,
+                    "is_published": False,
+                    "questions": [],
+                },
+                status=status.HTTP_200_OK,
+            )
         exam = FinalExam.objects.prefetch_related("questions__choices").get(id=exam.id)
-        return Response(FinalExamSerializer(exam, context={"include_answers": True}).data)
+        payload = FinalExamSerializer(exam, context={"include_answers": True}).data
+        payload["exists"] = True
+        return Response(payload)
 
     serializer = AdminFinalExamUpsertSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)

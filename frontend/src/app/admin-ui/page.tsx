@@ -89,6 +89,7 @@ type FinalExamQuestionForm = {
   choices: FinalExamChoiceForm[];
 };
 type FinalExamPayload = {
+  exists?: boolean;
   id: number;
   course_id: number;
   title: string;
@@ -177,7 +178,7 @@ export default function AdminUiPage() {
   const [insights, setInsights] = useState<AdminInsights | null>(null);
 
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
-  const [isCreatingNewCourse, setIsCreatingNewCourse] = useState(false);
+  const [isCreatingNewCourse, setIsCreatingNewCourse] = useState(true);
   const [selectedLessonIdForVideo, setSelectedLessonIdForVideo] = useState<number | null>(null);
   const [selectedLessonIdForQuiz, setSelectedLessonIdForQuiz] = useState<number | null>(null);
   const [step3ReadingContent, setStep3ReadingContent] = useState("");
@@ -197,8 +198,6 @@ export default function AdminUiPage() {
     level: "Beginner",
     price_cents: 0,
     is_published: true,
-    publish_at: "",
-    unpublish_at: "",
   });
 
   const [lessonForm, setLessonForm] = useState({
@@ -330,6 +329,26 @@ export default function AdminUiPage() {
     async (courseId: number) => {
       if (!accessToken) return;
       const exam = await apiFetch<FinalExamPayload>(`/admin/courses/${courseId}/final-exam/`, {}, accessToken);
+      if (exam.exists === false) {
+        setFinalExamExists(false);
+        setFinalExamForm({
+          title: "Final Exam",
+          passing_score: 70,
+          time_limit_sec: "",
+          is_published: false,
+          questions: [
+            {
+              prompt: "",
+              order: 1,
+              choices: [
+                { text: "", is_correct: true, order: 1 },
+                { text: "", is_correct: false, order: 2 },
+              ],
+            },
+          ],
+        });
+        return;
+      }
       setFinalExamExists(true);
       setFinalExamForm({
         title: exam.title || "Final Exam",
@@ -470,26 +489,6 @@ export default function AdminUiPage() {
 
     loadFinalExamForCourse(selectedCourseId)
       .catch((err) => {
-        if (err instanceof ApiError && err.status === 404) {
-          setFinalExamExists(false);
-          setFinalExamForm({
-            title: "Final Exam",
-            passing_score: 70,
-            time_limit_sec: "",
-            is_published: false,
-            questions: [
-              {
-                prompt: "",
-                order: 1,
-                choices: [
-                  { text: "", is_correct: true, order: 1 },
-                  { text: "", is_correct: false, order: 2 },
-                ],
-              },
-            ],
-          });
-          return;
-        }
         setFeedback({
           target: "step5-final-exam",
           type: "error",
@@ -521,11 +520,7 @@ export default function AdminUiPage() {
           "/admin/courses/",
           {
             method: "POST",
-            body: JSON.stringify({
-              ...courseForm,
-              publish_at: toIsoFromDateTimeLocal(courseForm.publish_at),
-              unpublish_at: toIsoFromDateTimeLocal(courseForm.unpublish_at),
-            }),
+            body: JSON.stringify(courseForm),
           },
           accessToken,
         );
@@ -538,8 +533,6 @@ export default function AdminUiPage() {
           level: "Beginner",
           price_cents: 0,
           is_published: true,
-          publish_at: "",
-          unpublish_at: "",
         });
       },
       "Course created. Continue with Step 2.",
@@ -624,8 +617,8 @@ export default function AdminUiPage() {
             return;
           }
           try {
-            const payload = JSON.parse(xhr.responseText) as { detail?: string };
-            reject(new Error(payload.detail || `Upload failed (${xhr.status})`));
+            const payload = JSON.parse(xhr.responseText) as { detail?: string; job?: { error_message?: string } };
+            reject(new Error(payload.job?.error_message || payload.detail || `Upload failed (${xhr.status})`));
           } catch {
             reject(new Error(`Upload failed (${xhr.status})`));
           }
@@ -1222,18 +1215,13 @@ export default function AdminUiPage() {
             </button>
           </div>
         </div>
-        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-600">Working Course</p>
           <select
-            className="w-full rounded border px-3 py-2 text-sm"
-            value={selectedCourseId != null ? String(selectedCourseId) : isCreatingNewCourse ? NEW_COURSE_SELECTOR_VALUE : ""}
+            className="w-full rounded border bg-white px-3 py-2 text-sm"
+            value={selectedCourseId != null ? String(selectedCourseId) : NEW_COURSE_SELECTOR_VALUE}
             onChange={(e) => {
               const value = e.target.value;
-              if (!value) {
-                setSelectedCourseId(null);
-                setIsCreatingNewCourse(false);
-                return;
-              }
               if (value === NEW_COURSE_SELECTOR_VALUE) {
                 setSelectedCourseId(null);
                 setIsCreatingNewCourse(true);
@@ -1244,7 +1232,6 @@ export default function AdminUiPage() {
             }}
           >
             <option value={NEW_COURSE_SELECTOR_VALUE}>+ Create new course (Step 1)</option>
-            <option disabled value="">Working course...</option>
             {courses.map((course) => (
               <option key={course.id} value={course.id}>
                 {course.title}
@@ -1378,20 +1365,6 @@ export default function AdminUiPage() {
               }
             />
             <textarea className="mt-2 w-full rounded border px-3 py-2" placeholder="Course description" value={courseForm.description} onChange={(e) => setCourseForm((v) => ({ ...v, description: e.target.value }))} />
-            <label className="mt-2 block text-xs text-slate-600">Schedule publish (optional)</label>
-            <input
-              type="datetime-local"
-              className="mt-1 w-full rounded border px-3 py-2"
-              value={courseForm.publish_at}
-              onChange={(e) => setCourseForm((v) => ({ ...v, publish_at: e.target.value }))}
-            />
-            <label className="mt-2 block text-xs text-slate-600">Schedule unpublish (optional)</label>
-            <input
-              type="datetime-local"
-              className="mt-1 w-full rounded border px-3 py-2"
-              value={courseForm.unpublish_at}
-              onChange={(e) => setCourseForm((v) => ({ ...v, unpublish_at: e.target.value }))}
-            />
             <label className="mt-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={courseForm.is_published} onChange={(e) => setCourseForm((v) => ({ ...v, is_published: e.target.checked }))} />
               Publish immediately
