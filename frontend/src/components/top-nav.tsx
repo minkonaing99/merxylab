@@ -23,6 +23,10 @@ export function TopNav() {
   const logoSrc = clientTheme === "dark" ? "/merxylab-logo-dark.png" : "/merxylab-logo-light.png";
   const desktopActionClass = "btn px-3 py-1.5 text-xs sm:w-auto sm:text-sm";
   const mobileActionClass = "btn w-full justify-start px-3 py-2 text-sm";
+  const linkClass = (baseClass: string, activePaths: string[]) => {
+    const isActive = activePaths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
+    return `${baseClass} ${isActive ? "btn-primary" : "btn-secondary"}`;
+  };
 
   useEffect(() => {
     if (!accessToken) {
@@ -84,7 +88,7 @@ export function TopNav() {
 
     if (pathname === "/") {
       return (
-        <Link className={`${actionClass} btn-primary`} href="/register" onClick={onAction}>
+        <Link className={linkClass(actionClass, ["/register"])} href="/register" onClick={onAction}>
           Start Learning
         </Link>
       );
@@ -94,10 +98,10 @@ export function TopNav() {
       return (
         <>
           {includeTheme && renderThemeToggle(actionClass, onAction)}
-          <Link className={`${actionClass} btn-secondary`} href="/" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/"])} href="/" onClick={onAction}>
             Home
           </Link>
-          <Link className={`${actionClass} btn-primary`} href="/register" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/register"])} href="/register" onClick={onAction}>
             Start Learning
           </Link>
         </>
@@ -108,10 +112,10 @@ export function TopNav() {
       return (
         <>
           {includeTheme && renderThemeToggle(actionClass, onAction)}
-          <Link className={`${actionClass} btn-secondary`} href="/" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/"])} href="/" onClick={onAction}>
             Home
           </Link>
-          <Link className={`${actionClass} btn-primary`} href="/login" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/login"])} href="/login" onClick={onAction}>
             Login
           </Link>
         </>
@@ -122,10 +126,10 @@ export function TopNav() {
       return (
         <>
           {includeTheme && renderThemeToggle(actionClass, onAction)}
-          <Link className={`${actionClass} btn-secondary`} href="/login" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/login"])} href="/login" onClick={onAction}>
             Login
           </Link>
-          <Link className={`${actionClass} btn-primary`} href="/register" onClick={onAction}>
+          <Link className={linkClass(actionClass, ["/register"])} href="/register" onClick={onAction}>
             Start Learning
           </Link>
         </>
@@ -137,23 +141,23 @@ export function TopNav() {
         {role !== "admin" && includeTheme && renderThemeToggle(actionClass, onAction)}
         {role === "admin" && (
           <>
-            <Link className={`${actionClass} btn-primary`} href="/admin-ui" onClick={onAction}>
+            <Link className={linkClass(actionClass, ["/admin-students"])} href="/admin-students" onClick={onAction}>
+              Students
+            </Link>
+            <Link className={linkClass(actionClass, ["/admin-ui"])} href="/admin-ui" onClick={onAction}>
               Admin
             </Link>
-            <Link className={`${actionClass} btn-secondary`} href="/admin-schedule" onClick={onAction}>
+            <Link className={linkClass(actionClass, ["/admin-schedule"])} href="/admin-schedule" onClick={onAction}>
               Schedule
-            </Link>
-            <Link className={`${actionClass} btn-secondary`} href="/admin-students" onClick={onAction}>
-              Students
             </Link>
           </>
         )}
         {role !== "admin" && (
           <>
-            <Link className={`${actionClass} btn-primary`} href="/dashboard" onClick={onAction}>
+            <Link className={linkClass(actionClass, ["/dashboard"])} href="/dashboard" onClick={onAction}>
               Dashboard
             </Link>
-            <Link className={`${actionClass} btn-secondary`} href="/profile" onClick={onAction}>
+            <Link className={linkClass(actionClass, ["/profile"])} href="/profile" onClick={onAction}>
               Profile
             </Link>
           </>

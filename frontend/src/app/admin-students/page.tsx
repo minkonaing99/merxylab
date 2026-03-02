@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
@@ -113,6 +114,7 @@ export default function AdminStudentsPage() {
   const [loading, setLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const expelPhrase = "I would like to expell this student";
+  const selectedStudent = students.find((row) => row.user_id === selectedStudentId) ?? null;
 
   useEffect(() => {
     setTheme("light");
@@ -120,7 +122,15 @@ export default function AdminStudentsPage() {
 
   const loadStudents = useCallback(async (token: string) => {
     const rows = await apiFetch<StudentRow[]>("/admin/students/", {}, token);
-    setStudents(rows);
+    const rank: Record<string, number> = { PENDING: 0, REJECTED: 1, VERIFIED: 2 };
+    const sorted = [...rows].sort((a, b) => {
+      const ar = rank[a.verification_status || "PENDING"] ?? 99;
+      const br = rank[b.verification_status || "PENDING"] ?? 99;
+      if (ar !== br) return ar - br;
+      return a.username.localeCompare(b.username);
+    });
+    setStudents(sorted);
+    setSelectedStudentId((prev) => (prev && sorted.some((row) => row.user_id === prev) ? prev : null));
   }, []);
 
   const loadWallet = useCallback(async (token: string, userId: number) => {
@@ -279,6 +289,16 @@ export default function AdminStudentsPage() {
     }
   };
 
+  const backToStudentOverview = () => {
+    setSelectedStudentId(null);
+    setWalletDetail(null);
+    setStudentProfile(null);
+    setStudentCertificates(null);
+    setVerificationLogs([]);
+    setReviewNote("");
+    setCertificateActionReason("");
+  };
+
   if (isAdmin === null) {
     return <main className="admin-theme-scope page-wrap">Checking access...</main>;
   }
@@ -289,169 +309,24 @@ export default function AdminStudentsPage() {
       <p className="mt-2 text-sm muted">Manage student profile verification, passport review, balances, and enrollment payment status.</p>
       {error && <p className="mt-4 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
       {notice && <p className="mt-4 rounded-lg border border-emerald-300 bg-emerald-500/10 p-3 text-sm text-emerald-500">{notice}</p>}
+      {selectedStudent && (
+        <section className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="flex items-center gap-1 text-xs uppercase tracking-wide text-slate-500">
+            <button
+              type="button"
+              className="rounded px-1 py-0.5 hover:bg-slate-200 hover:text-slate-700"
+              onClick={backToStudentOverview}
+            >
+              Student
+            </button>
+            <span>/</span>
+            <span>{selectedStudent.username}</span>
+          </p>
+        </section>
+      )}
 
-      <section className="mt-6 surface p-5">
-        <h2 className="text-lg font-semibold">Student Profile Verification</h2>
-        {!studentProfile && <p className="mt-3 text-sm muted">Select a student to review profile and passport details.</p>}
-        {studentProfile && (
-          <>
-            <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
-              <p><strong>Full Name:</strong> {studentProfile.profile.full_name || "-"}</p>
-              <p><strong>Date of Birth:</strong> {studentProfile.profile.date_of_birth || "-"}</p>
-              <p><strong>Passport Number:</strong> {studentProfile.profile.passport_number || "-"}</p>
-              <p><strong>Phone:</strong> {studentProfile.profile.phone_number || "-"}</p>
-              <p><strong>Country/City:</strong> {studentProfile.profile.country || "-"} / {studentProfile.profile.city || "-"}</p>
-              <p><strong>Current Status:</strong> {studentProfile.profile.verification_status}</p>
-              <p className="md:col-span-2"><strong>Address:</strong> {studentProfile.profile.address || "-"}</p>
-              <p className="md:col-span-2"><strong>Admin Note:</strong> {studentProfile.profile.verification_note || "-"}</p>
-            </div>
-            <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
-              <p className="text-sm font-medium">Passport Photo</p>
-              {studentProfile.profile.passport_photo_url ? (
-                <img
-                  src={studentProfile.profile.passport_photo_url}
-                  alt="Passport"
-                  className="mt-2 max-h-80 w-full max-w-md rounded border object-contain"
-                />
-              ) : (
-                <p className="mt-2 text-xs muted">No passport photo uploaded.</p>
-              )}
-            </div>
-            {studentProfile.profile.passport_photo_url && studentProfile.profile.verification_status !== "VERIFIED" ? (
-              <div className="mt-3 grid gap-2">
-                <input
-                  className="input"
-                  placeholder="Review note (optional for approve, recommended for deny)"
-                  value={reviewNote}
-                  onChange={(e) => setReviewNote(e.target.value)}
-                />
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <button type="button" className="btn btn-primary" disabled={loading} onClick={() => reviewProfile("approve")}>
-                    Approve
-                  </button>
-                  <button type="button" className="btn btn-danger" disabled={loading} onClick={() => reviewProfile("deny")}>
-                    Deny (Require Re-upload)
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <p className="mt-3 text-xs muted">
-                {studentProfile.profile.verification_status === "VERIFIED"
-                  ? "Profile is already approved."
-                  : "Approval actions are available after the student uploads a passport photo."}
-              </p>
-            )}
-          </>
-        )}
-      </section>
-
-      <section className="mt-6 surface p-5">
-        <h2 className="text-lg font-semibold">Certificate Trust Control</h2>
-        {!studentCertificates && <p className="mt-3 text-sm muted">Select a student to manage certificate trust.</p>}
-        {studentCertificates && (
-          <>
-            <p className="mt-2 text-sm muted">
-              Manage revoke/reissue actions and track audit logs per certificate.
-            </p>
-            <input
-              className="input mt-3"
-              placeholder="Action reason (recommended)"
-              value={certificateActionReason}
-              onChange={(e) => setCertificateActionReason(e.target.value)}
-            />
-            <div className="mt-3 space-y-3">
-              {studentCertificates.certificates.map((row) => {
-                const revoked = Boolean(row.certificate.revoked_at);
-                return (
-                  <article key={row.certificate.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-semibold">{row.course.title}</p>
-                        <p className="text-xs muted">
-                          Certificate: {row.certificate.certificate_code} | Verify: {row.certificate.verification_code}
-                        </p>
-                        <p className="text-xs muted">
-                          Issued: {new Date(row.certificate.issued_at).toLocaleString()}
-                        </p>
-                        {revoked && (
-                          <p className="text-xs text-red-600">
-                            Revoked: {new Date(row.certificate.revoked_at as string).toLocaleString()}
-                            {row.certificate.revoked_reason ? ` | ${row.certificate.revoked_reason}` : ""}
-                          </p>
-                        )}
-                      </div>
-                      <div className="flex gap-2">
-                        {!revoked && (
-                          <button
-                            type="button"
-                            className="btn btn-danger px-3 py-1 text-xs"
-                            disabled={loading}
-                            onClick={() => runCertificateAction(row.certificate.id, "revoke")}
-                          >
-                            Revoke
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="btn btn-secondary px-3 py-1 text-xs"
-                          disabled={loading}
-                          onClick={() => runCertificateAction(row.certificate.id, "reissue")}
-                        >
-                          Reissue
-                        </button>
-                      </div>
-                    </div>
-                    <p className="mt-2 break-all text-xs">
-                      <strong>Verify URL:</strong> {row.certificate.verification_url}
-                    </p>
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-xs font-medium text-slate-700">Audit Log</summary>
-                      <ul className="mt-2 space-y-1 text-xs">
-                        {row.audit_logs.map((log) => (
-                          <li key={log.id} className="rounded border border-slate-200 bg-white px-2 py-1">
-                            <strong>{log.action}</strong> by {log.actor_username || "system"} at{" "}
-                            {new Date(log.created_at).toLocaleString()}
-                            {log.reason ? ` | ${log.reason}` : ""}
-                          </li>
-                        ))}
-                        {row.audit_logs.length === 0 && <li className="muted">No audit events yet.</li>}
-                      </ul>
-                    </details>
-                  </article>
-                );
-              })}
-              {studentCertificates.certificates.length === 0 && (
-                <p className="text-sm muted">No certificates issued for this student yet.</p>
-              )}
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="mt-6 surface p-5">
-        <h2 className="text-lg font-semibold">Public Verification Events</h2>
-        <p className="mt-2 text-sm muted">Recent checks from the public verify endpoint for this student.</p>
-        <div className="mt-3 max-h-64 overflow-y-auto rounded border border-slate-200">
-          <ul className="divide-y divide-slate-200 text-sm">
-            {verificationLogs.map((row) => (
-              <li key={row.id} className="p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-medium">{row.status}</span>
-                  <span className="text-xs muted">{new Date(row.created_at).toLocaleString()}</span>
-                </div>
-                <p className="mt-1 text-xs muted">
-                  Verify: {row.verification_code} | Cert: {row.certificate_code || "-"} | IP: {row.ip_address || "-"}
-                </p>
-                {row.detail && <p className="mt-1 text-xs">{row.detail}</p>}
-              </li>
-            ))}
-            {verificationLogs.length === 0 && <li className="p-3 text-xs muted">No verification events yet.</li>}
-          </ul>
-        </div>
-      </section>
-
-      <section className="mt-6 grid gap-4 lg:grid-cols-2">
-        <div className="surface p-5">
+      {!selectedStudentId && (
+        <section className="mt-6 surface p-5">
           <h2 className="text-lg font-semibold">Students</h2>
           <div className="mt-3 grid gap-3 md:hidden">
             {students.map((student) => (
@@ -560,99 +435,266 @@ export default function AdminStudentsPage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </section>
+      )}
 
-        <div className="surface p-5">
-          <h2 className="text-lg font-semibold">Wallet Detail</h2>
-          {!walletDetail && <p className="mt-3 text-sm muted">Select a student from the left table.</p>}
-          {walletDetail && (
-            <>
-              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                <p>Student: <strong>{walletDetail.student.username}</strong></p>
-                <p>Balance: <strong>{walletDetail.wallet.balance_credits}</strong></p>
-              </div>
-              <form onSubmit={adjustCredits} className="mt-3 grid gap-2">
-                <input
-                  type="number"
-                  className="input"
-                  placeholder="Amount (+add / -deduct)"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  required
-                />
-                <input
-                  className="input"
-                  placeholder="Note (optional)"
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                />
-                <button className="btn btn-primary" disabled={loading}>
-                  {loading ? "Saving..." : "Apply Credit Adjustment"}
-                </button>
-              </form>
+      {selectedStudentId && (
+        <>
+          <section className="mt-6 surface p-5">
+            <h2 className="text-lg font-semibold">Student Profile Verification</h2>
+            {!studentProfile && <p className="mt-3 text-sm muted">Loading student profile...</p>}
+            {studentProfile && (
+              <>
+                <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+                  <p><strong>Full Name:</strong> {studentProfile.profile.full_name || "-"}</p>
+                  <p><strong>Date of Birth:</strong> {studentProfile.profile.date_of_birth || "-"}</p>
+                  <p><strong>Passport Number:</strong> {studentProfile.profile.passport_number || "-"}</p>
+                  <p><strong>Phone:</strong> {studentProfile.profile.phone_number || "-"}</p>
+                  <p><strong>Country/City:</strong> {studentProfile.profile.country || "-"} / {studentProfile.profile.city || "-"}</p>
+                  <p><strong>Current Status:</strong> {studentProfile.profile.verification_status}</p>
+                  <p className="md:col-span-2"><strong>Address:</strong> {studentProfile.profile.address || "-"}</p>
+                  <p className="md:col-span-2"><strong>Admin Note:</strong> {studentProfile.profile.verification_note || "-"}</p>
+                </div>
+                <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-sm font-medium">Passport Photo</p>
+                  {studentProfile.profile.passport_photo_url ? (
+                    <Image
+                      src={studentProfile.profile.passport_photo_url}
+                      alt="Passport"
+                      width={768}
+                      height={512}
+                      unoptimized
+                      className="mt-2 max-h-80 w-full max-w-md rounded border object-contain"
+                    />
+                  ) : (
+                    <p className="mt-2 text-xs muted">No passport photo uploaded.</p>
+                  )}
+                </div>
+                {studentProfile.profile.passport_photo_url && studentProfile.profile.verification_status !== "VERIFIED" ? (
+                  <div className="mt-3 grid gap-2">
+                    <input
+                      className="input"
+                      placeholder="Review note (optional for approve, recommended for deny)"
+                      value={reviewNote}
+                      onChange={(e) => setReviewNote(e.target.value)}
+                    />
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <button type="button" className="btn btn-primary" disabled={loading} onClick={() => reviewProfile("approve")}>
+                        Approve
+                      </button>
+                      <button type="button" className="btn btn-danger" disabled={loading} onClick={() => reviewProfile("deny")}>
+                        Deny (Require Re-upload)
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs muted">
+                    {studentProfile.profile.verification_status === "VERIFIED"
+                      ? "Profile is already approved."
+                      : "Approval actions are available after the student uploads a passport photo."}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
 
-              <h3 className="mt-5 text-sm font-semibold">Recent Transactions</h3>
-              <div className="mt-2 max-h-64 overflow-y-auto rounded border border-slate-200">
-                <ul className="divide-y divide-slate-200 text-sm">
-                  {walletDetail.transactions.map((tx) => (
-                    <li key={tx.id} className="p-3">
-                      <div className="flex items-center justify-between">
-                        <span className={tx.amount >= 0 ? "text-emerald-600" : "text-red-600"}>
-                          {tx.amount >= 0 ? `+${tx.amount}` : tx.amount}
-                        </span>
-                        <span className="text-xs muted">After: {tx.balance_after}</span>
-                      </div>
-                      <p className="text-xs muted">
-                        {tx.kind} {tx.course_title ? `| ${tx.course_title}` : ""} {tx.note ? `| ${tx.note}` : ""}
-                      </p>
-                    </li>
-                  ))}
-                  {walletDetail.transactions.length === 0 && <li className="p-3 text-xs muted">No transactions yet.</li>}
-                </ul>
-              </div>
-
-              <h3 className="mt-5 text-sm font-semibold">Owned Courses</h3>
-              <div className="mt-2 max-h-40 overflow-y-auto rounded border border-slate-200 p-2">
-                <ul className="space-y-1 text-sm">
-                  {walletDetail.enrollments.map((enrollment) => (
-                    <li key={enrollment.id} className="flex items-start justify-between gap-2 rounded bg-slate-50 px-2 py-1">
-                      <span className="min-w-0 flex-1 break-words">{enrollment.course.title}</span>
-                      <span className="text-xs muted">{enrollment.status}</span>
-                    </li>
-                  ))}
-                  {walletDetail.enrollments.length === 0 && <li className="text-xs muted">No enrolled courses.</li>}
-                </ul>
-              </div>
-
-              <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3">
-                <h3 className="text-sm font-semibold text-red-700">Danger Zone</h3>
-                <p className="mt-1 text-xs text-red-600">
-                  This will permanently remove the student account and related data.
+          <section className="mt-6 surface p-5">
+            <h2 className="text-lg font-semibold">Certificate Trust Control</h2>
+            {!studentCertificates && <p className="mt-3 text-sm muted">Loading certificate data...</p>}
+            {studentCertificates && (
+              <>
+                <p className="mt-2 text-sm muted">
+                  Manage revoke/reissue actions and track audit logs per certificate.
                 </p>
-                <label className="mt-2 block text-xs text-red-700">
-                  Type exactly:
-                  {" "}
-                  <strong>{expelPhrase}</strong>
-                </label>
                 <input
-                  className="input mt-1"
-                  placeholder={expelPhrase}
-                  value={expelConfirm}
-                  onChange={(e) => setExpelConfirm(e.target.value)}
+                  className="input mt-3"
+                  placeholder="Action reason (recommended)"
+                  value={certificateActionReason}
+                  onChange={(e) => setCertificateActionReason(e.target.value)}
                 />
-                <button
-                  type="button"
-                  className="btn btn-danger mt-2"
-                  onClick={expelStudent}
-                  disabled={loading || expelConfirm !== expelPhrase}
-                >
-                  Expel Student
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </section>
+                <div className="mt-3 space-y-3">
+                  {studentCertificates.certificates.map((row) => {
+                    const revoked = Boolean(row.certificate.revoked_at);
+                    return (
+                      <article key={row.certificate.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold">{row.course.title}</p>
+                            <p className="text-xs muted">
+                              Certificate: {row.certificate.certificate_code} | Verify: {row.certificate.verification_code}
+                            </p>
+                            <p className="text-xs muted">
+                              Issued: {new Date(row.certificate.issued_at).toLocaleString()}
+                            </p>
+                            {revoked && (
+                              <p className="text-xs text-red-600">
+                                Revoked: {new Date(row.certificate.revoked_at as string).toLocaleString()}
+                                {row.certificate.revoked_reason ? ` | ${row.certificate.revoked_reason}` : ""}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex gap-2">
+                            {!revoked && (
+                              <button
+                                type="button"
+                                className="btn btn-danger px-3 py-1 text-xs"
+                                disabled={loading}
+                                onClick={() => runCertificateAction(row.certificate.id, "revoke")}
+                              >
+                                Revoke
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-secondary px-3 py-1 text-xs"
+                              disabled={loading}
+                              onClick={() => runCertificateAction(row.certificate.id, "reissue")}
+                            >
+                              Reissue
+                            </button>
+                          </div>
+                        </div>
+                        <p className="mt-2 break-all text-xs">
+                          <strong>Verify URL:</strong> {row.certificate.verification_url}
+                        </p>
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs font-medium text-slate-700">Audit Log</summary>
+                          <ul className="mt-2 space-y-1 text-xs">
+                            {row.audit_logs.map((log) => (
+                              <li key={log.id} className="rounded border border-slate-200 bg-white px-2 py-1">
+                                <strong>{log.action}</strong> by {log.actor_username || "system"} at{" "}
+                                {new Date(log.created_at).toLocaleString()}
+                                {log.reason ? ` | ${log.reason}` : ""}
+                              </li>
+                            ))}
+                            {row.audit_logs.length === 0 && <li className="muted">No audit events yet.</li>}
+                          </ul>
+                        </details>
+                      </article>
+                    );
+                  })}
+                  {studentCertificates.certificates.length === 0 && (
+                    <p className="text-sm muted">No certificates issued for this student yet.</p>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="mt-6 surface p-5">
+            <h2 className="text-lg font-semibold">Public Verification Events</h2>
+            <p className="mt-2 text-sm muted">Recent checks from the public verify endpoint for this student.</p>
+            <div className="mt-3 max-h-64 overflow-y-auto rounded border border-slate-200">
+              <ul className="divide-y divide-slate-200 text-sm">
+                {verificationLogs.map((row) => (
+                  <li key={row.id} className="p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">{row.status}</span>
+                      <span className="text-xs muted">{new Date(row.created_at).toLocaleString()}</span>
+                    </div>
+                    <p className="mt-1 text-xs muted">
+                      Verify: {row.verification_code} | Cert: {row.certificate_code || "-"} | IP: {row.ip_address || "-"}
+                    </p>
+                    {row.detail && <p className="mt-1 text-xs">{row.detail}</p>}
+                  </li>
+                ))}
+                {verificationLogs.length === 0 && <li className="p-3 text-xs muted">No verification events yet.</li>}
+              </ul>
+            </div>
+          </section>
+
+          <section className="mt-6 surface p-5">
+            <h2 className="text-lg font-semibold">Wallet Detail</h2>
+            {!walletDetail && <p className="mt-3 text-sm muted">Loading wallet detail...</p>}
+            {walletDetail && (
+              <>
+                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                  <p>Student: <strong>{walletDetail.student.username}</strong></p>
+                  <p>Balance: <strong>{walletDetail.wallet.balance_credits}</strong></p>
+                </div>
+                <form onSubmit={adjustCredits} className="mt-3 grid gap-2">
+                  <input
+                    type="number"
+                    className="input"
+                    placeholder="Amount (+add / -deduct)"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    required
+                  />
+                  <input
+                    className="input"
+                    placeholder="Note (optional)"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                  />
+                  <button className="btn btn-primary" disabled={loading}>
+                    {loading ? "Saving..." : "Apply Credit Adjustment"}
+                  </button>
+                </form>
+
+                <h3 className="mt-5 text-sm font-semibold">Recent Transactions</h3>
+                <div className="mt-2 max-h-64 overflow-y-auto rounded border border-slate-200">
+                  <ul className="divide-y divide-slate-200 text-sm">
+                    {walletDetail.transactions.map((tx) => (
+                      <li key={tx.id} className="p-3">
+                        <div className="flex items-center justify-between">
+                          <span className={tx.amount >= 0 ? "text-emerald-600" : "text-red-600"}>
+                            {tx.amount >= 0 ? `+${tx.amount}` : tx.amount}
+                          </span>
+                          <span className="text-xs muted">After: {tx.balance_after}</span>
+                        </div>
+                        <p className="text-xs muted">
+                          {tx.kind} {tx.course_title ? `| ${tx.course_title}` : ""} {tx.note ? `| ${tx.note}` : ""}
+                        </p>
+                      </li>
+                    ))}
+                    {walletDetail.transactions.length === 0 && <li className="p-3 text-xs muted">No transactions yet.</li>}
+                  </ul>
+                </div>
+
+                <h3 className="mt-5 text-sm font-semibold">Owned Courses</h3>
+                <div className="mt-2 max-h-40 overflow-y-auto rounded border border-slate-200 p-2">
+                  <ul className="space-y-1 text-sm">
+                    {walletDetail.enrollments.map((enrollment) => (
+                      <li key={enrollment.id} className="flex items-start justify-between gap-2 rounded bg-slate-50 px-2 py-1">
+                        <span className="min-w-0 flex-1 break-words">{enrollment.course.title}</span>
+                        <span className="text-xs muted">{enrollment.status}</span>
+                      </li>
+                    ))}
+                    {walletDetail.enrollments.length === 0 && <li className="text-xs muted">No enrolled courses.</li>}
+                  </ul>
+                </div>
+
+                <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3">
+                  <h3 className="text-sm font-semibold text-red-700">Danger Zone</h3>
+                  <p className="mt-1 text-xs text-red-600">
+                    This will permanently remove the student account and related data.
+                  </p>
+                  <label className="mt-2 block text-xs text-red-700">
+                    Type exactly:
+                    {" "}
+                    <strong>{expelPhrase}</strong>
+                  </label>
+                  <input
+                    className="input mt-1"
+                    placeholder={expelPhrase}
+                    value={expelConfirm}
+                    onChange={(e) => setExpelConfirm(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-danger mt-2"
+                    onClick={expelStudent}
+                    disabled={loading || expelConfirm !== expelPhrase}
+                  >
+                    Expel Student
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </>
+      )}
     </main>
   );
 }

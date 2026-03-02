@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useMemo, useState, useEffect } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
@@ -224,7 +225,14 @@ export default function StudentCertificatePage() {
             </div>
             <div className="surface-soft mx-auto flex w-full max-w-[220px] flex-col items-center justify-center rounded-xl p-3 md:mx-0">
               {qrImageUrl ? (
-                <img src={qrImageUrl} alt="Certificate QR code" className="h-44 w-44 rounded border border-slate-200 bg-white p-1" />
+                <Image
+                  src={qrImageUrl}
+                  alt="Certificate QR code"
+                  width={176}
+                  height={176}
+                  unoptimized
+                  className="h-44 w-44 rounded border border-slate-200 bg-white p-1"
+                />
               ) : (
                 <p className="text-xs muted">No QR available</p>
               )}

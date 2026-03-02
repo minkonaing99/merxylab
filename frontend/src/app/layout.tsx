@@ -3,6 +3,7 @@ import { Space_Grotesk, Source_Serif_4 } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
+import { AdminUploadTrackerProvider } from "@/components/admin-upload-tracker";
 
 const spaceGrotesk = Space_Grotesk({
   variable: "--font-space-grotesk",
@@ -43,8 +44,10 @@ export default function RootLayout({
       <body
         className={`${spaceGrotesk.variable} ${sourceSerif.variable} antialiased`}
       >
-        <TopNav />
-        {children}
+        <AdminUploadTrackerProvider>
+          <TopNav />
+          {children}
+        </AdminUploadTrackerProvider>
       </body>
     </html>
   );

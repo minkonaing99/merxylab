@@ -1,6 +1,7 @@
 import glob
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from celery import shared_task
@@ -64,6 +65,35 @@ def _set_job_failed(job, message):
     job.save(update_fields=["status", "progress_percent", "error_message", "finished_at", "updated_at"])
 
 
+def _get_input_duration_seconds(ffprobe_bin, input_path, fallback=None):
+    duration_seconds = fallback
+    if not ffprobe_bin:
+        return duration_seconds
+    ffprobe_cmd = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(input_path),
+    ]
+    ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=120)
+    if ffprobe_result.returncode == 0:
+        try:
+            value = float(ffprobe_result.stdout.strip())
+            if value > 0:
+                duration_seconds = int(value)
+        except ValueError:
+            pass
+    return duration_seconds
+
+
+def _update_job_progress(job_id, new_progress):
+    VideoTranscodeJob.objects.filter(id=job_id).update(progress_percent=int(new_progress), updated_at=timezone.now())
+
+
 @shared_task(bind=True, max_retries=10)
 def process_video_transcode_job(self, job_id):
     try:
@@ -119,11 +149,20 @@ def process_video_transcode_job(self, job_id):
     master_path = output_dir / "master.m3u8"
     segment_pattern = str(output_dir / "seg_%03d.ts")
 
+    # Probe source duration first so we can compute true transcoding progress.
+    duration_seconds = _get_input_duration_seconds(ffprobe_bin, input_path, fallback=lesson.duration_seconds)
+    duration_us = int(duration_seconds * 1_000_000) if duration_seconds else None
+
     ffmpeg_cmd = [
         ffmpeg_bin,
         "-y",
         "-i",
         str(input_path),
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-loglevel",
+        "error",
         "-c:v",
         "libx264",
         "-c:a",
@@ -139,28 +178,51 @@ def process_video_transcode_job(self, job_id):
 
     timeout_seconds = int(getattr(settings, "VIDEO_TRANSCODE_TIMEOUT_SECONDS", 7200))
     try:
-        ffmpeg_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout_seconds)
-        if ffmpeg_result.returncode != 0 or not master_path.exists():
-            raise RuntimeError(f"Video transcoding failed. {ffmpeg_result.stderr[-1200:]}")
+        process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
 
-        duration_seconds = lesson.duration_seconds
-        if ffprobe_bin:
-            ffprobe_cmd = [
-                ffprobe_bin,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(input_path),
-            ]
-            ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=120)
-            if ffprobe_result.returncode == 0:
+        current_progress = 10
+        last_update_ts = time.monotonic()
+        deadline = time.monotonic() + timeout_seconds
+
+        for raw_line in process.stdout:
+            if time.monotonic() > deadline:
+                process.kill()
+                raise TimeoutError("Video transcoding timed out.")
+
+            line = (raw_line or "").strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key == "out_time_ms" and duration_us:
                 try:
-                    duration_seconds = int(float(ffprobe_result.stdout.strip()))
+                    out_time_us = int(value)
+                    computed = int((out_time_us / duration_us) * 100)
+                    computed = max(10, min(95, computed))
+                    if computed > current_progress and (time.monotonic() - last_update_ts >= 0.5):
+                        current_progress = computed
+                        _update_job_progress(job_id, current_progress)
+                        last_update_ts = time.monotonic()
                 except ValueError:
                     pass
+            elif key == "progress" and value == "end":
+                # Keep 99% until final DB updates complete.
+                if current_progress < 99:
+                    current_progress = 99
+                    _update_job_progress(job_id, current_progress)
+
+        return_code = process.wait(timeout=30)
+        stderr_text = process.stderr.read() if process.stderr else ""
+        if return_code != 0 or not master_path.exists():
+            raise RuntimeError(f"Video transcoding failed. {stderr_text[-1200:]}")
 
         hls_path = f"media/hls/course_{lesson.course_id}/lesson_{lesson.id}/master.m3u8"
         lesson.hls_master_path = hls_path

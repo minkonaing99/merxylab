@@ -63,6 +63,8 @@ export default function CourseFinalExamPage() {
   const [pendingUnansweredCount, setPendingUnansweredCount] = useState(0);
   const [retryFeeLock, setRetryFeeLock] = useState<RetryFeeLock | null>(null);
   const [showFullscreenViolationModal, setShowFullscreenViolationModal] = useState(false);
+  const [examModeActive, setExamModeActive] = useState(false);
+  const [isIosLike, setIsIosLike] = useState(false);
 
   const loadExam = useCallback(async () => {
     const token = accessToken || getAccessToken();
@@ -103,6 +105,17 @@ export default function CourseFinalExamPage() {
     void loadExam();
   }, [loadExam]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const ua = window.navigator.userAgent || "";
+    const platform = window.navigator.platform || "";
+    const maxTouchPoints = window.navigator.maxTouchPoints || 0;
+    const ios =
+      /iPad|iPhone|iPod/i.test(ua) ||
+      (platform === "MacIntel" && maxTouchPoints > 1);
+    setIsIosLike(Boolean(ios));
+  }, []);
+
   const autoFailFinalExam = useCallback(async (reason: string) => {
     if (!exam || result || policyLocked) return;
     const token = accessToken || getAccessToken();
@@ -132,14 +145,19 @@ export default function CourseFinalExamPage() {
 
   useEffect(() => {
     const forceFailForTabSwitching = async () => {
-      await autoFailFinalExam("Auto-failed: more than 2 tab switches detected.");
+      await autoFailFinalExam(
+        isIosLike
+          ? "Auto-failed: more than 1 tab/app switch detected in iOS exam mode."
+          : "Auto-failed: more than 2 tab switches detected."
+      );
     };
 
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
         setTabSwitchCount((v) => {
           const next = v + 1;
-          if (next > 2) {
+          const failThreshold = isIosLike ? 2 : 3;
+          if (next >= failThreshold) {
             void forceFailForTabSwitching();
           }
           return next;
@@ -147,6 +165,7 @@ export default function CourseFinalExamPage() {
       }
     };
     const onFullscreenChange = () => {
+      if (isIosLike) return;
       const next = Boolean(document.fullscreenElement);
       setIsFullscreen(next);
       if (next) {
@@ -172,7 +191,34 @@ export default function CourseFinalExamPage() {
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("fullscreenchange", onFullscreenChange);
     };
-  }, [accessToken, autoFailFinalExam, courseId, everEnteredFullscreen, exam, policyLocked, result]);
+  }, [accessToken, autoFailFinalExam, courseId, everEnteredFullscreen, exam, isIosLike, policyLocked, result]);
+
+  useEffect(() => {
+    // Prevent trivial clipboard/context-menu interactions during active exam mode.
+    if (!exam || result || retryFeeLock) return;
+    const active = isIosLike ? examModeActive : isFullscreen;
+    if (!active) return;
+
+    const prevent = (event: Event) => event.preventDefault();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && ["c", "v", "x", "a"].includes(event.key.toLowerCase())) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener("contextmenu", prevent);
+    document.addEventListener("copy", prevent);
+    document.addEventListener("paste", prevent);
+    document.addEventListener("cut", prevent);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("contextmenu", prevent);
+      document.removeEventListener("copy", prevent);
+      document.removeEventListener("paste", prevent);
+      document.removeEventListener("cut", prevent);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [exam, examModeActive, isFullscreen, isIosLike, result, retryFeeLock]);
 
   const enterFullscreen = async () => {
     try {
@@ -232,10 +278,18 @@ export default function CourseFinalExamPage() {
       {error && <p className="mt-4 rounded-lg border border-red-300 bg-red-500/10 p-3 text-sm text-red-500">{error}</p>}
       {exam && !result && !retryFeeLock && (
         <div className="mt-4 rounded-lg border border-amber-300 bg-amber-500/10 p-3 text-xs text-amber-700">
-          <p>Anti-cheat monitoring: tab switches {tabSwitchCount}, fullscreen exits {fullscreenExitedCount}.</p>
-          {!isFullscreen && (
+          <p>
+            Anti-cheat monitoring: tab switches {tabSwitchCount}, fullscreen exits {isIosLike ? 0 : fullscreenExitedCount}.
+            {isIosLike ? " iOS exam mode allows up to 1 tab/app switch (2nd causes auto-fail)." : ""}
+          </p>
+          {!isIosLike && !isFullscreen && (
             <button type="button" className="btn btn-secondary mt-2" onClick={enterFullscreen}>
               Enter Fullscreen
+            </button>
+          )}
+          {isIosLike && !examModeActive && (
+            <button type="button" className="btn btn-secondary mt-2" onClick={() => setExamModeActive(true)}>
+              Start Exam Mode
             </button>
           )}
         </div>
@@ -261,7 +315,23 @@ export default function CourseFinalExamPage() {
         </section>
       )}
 
-      {exam && !result && !retryFeeLock && !isFullscreen && (
+      {exam && !result && !retryFeeLock && isIosLike && !examModeActive && (
+        <section className="surface mt-6 p-5">
+          <h2 className="text-lg font-semibold">Exam Mode Required (iOS)</h2>
+          <p className="mt-2 text-sm muted">
+            iOS browsers do not support reliable fullscreen. Start Exam Mode to begin under strict anti-cheat policy.
+          </p>
+          <ul className="mt-2 list-disc pl-5 text-sm muted">
+            <li>Second tab/app switch will auto-fail this attempt.</li>
+            <li>Copy/paste and context menu are blocked during active exam mode.</li>
+          </ul>
+          <button type="button" className="btn btn-primary mt-3" onClick={() => setExamModeActive(true)}>
+            Start Exam Mode
+          </button>
+        </section>
+      )}
+
+      {exam && !result && !retryFeeLock && !isIosLike && !isFullscreen && (
         <section className="surface mt-6 p-5">
           <h2 className="text-lg font-semibold">{everEnteredFullscreen ? "Final Exam Paused" : "Fullscreen Required"}</h2>
           <p className="mt-2 text-sm muted">
@@ -274,7 +344,7 @@ export default function CourseFinalExamPage() {
           </button>
         </section>
       )}
-      {exam && !result && !retryFeeLock && pausedByFullscreenExit && isFullscreen && (
+      {exam && !result && !retryFeeLock && !isIosLike && pausedByFullscreenExit && isFullscreen && (
         <section className="surface mt-6 p-5">
           <h2 className="text-lg font-semibold">Final Exam Paused</h2>
           <p className="mt-2 text-sm muted">
@@ -285,7 +355,7 @@ export default function CourseFinalExamPage() {
           </button>
         </section>
       )}
-      {exam && !result && !retryFeeLock && !pausedByFullscreenExit && isFullscreen && (
+      {exam && !result && !retryFeeLock && ((isIosLike && examModeActive) || (!isIosLike && !pausedByFullscreenExit && isFullscreen)) && (
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
           <section className="surface p-5">
             <h2 className="text-xl font-semibold">{exam.title}</h2>

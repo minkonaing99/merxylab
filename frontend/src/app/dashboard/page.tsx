@@ -87,7 +87,7 @@ export default function DashboardPage() {
       apiFetch<CourseCatalog[]>("/courses/", {}, token),
     ]);
     if (meData.role === "admin") {
-      router.replace("/admin-ui");
+      router.replace("/admin-students");
       return;
     }
     const progressRows = await Promise.all(
