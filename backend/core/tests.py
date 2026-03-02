@@ -1,12 +1,26 @@
 from datetime import timedelta
+import threading
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.test import override_settings
 from django.utils import timezone
-from rest_framework.test import APITransactionTestCase
+from rest_framework.test import APIClient, APITransactionTestCase
 
-from core.models import Certificate, Course, CreditWallet, Enrollment, FinalExam, FinalExamChoice, FinalExamQuestion, FinalExamSession, Lesson, QuizAttempt, UserLessonProgress
+from core.models import (
+    Certificate,
+    Course,
+    CreditTransaction,
+    CreditWallet,
+    Enrollment,
+    FinalExam,
+    FinalExamChoice,
+    FinalExamQuestion,
+    FinalExamSession,
+    Lesson,
+    QuizAttempt,
+    UserLessonProgress,
+)
 
 
 @override_settings(MONGO_URI="", MONGO_DB="merxylab")
@@ -113,7 +127,8 @@ class CoreApiFlowTests(APITransactionTestCase):
         self.assertEqual(anon.status_code, 200)
         lesson_map = {item["id"]: item for item in anon.data["lessons"]}
         self.assertFalse(lesson_map[self.lesson1.id]["locked"])
-        self.assertTrue(lesson_map[self.lesson2.id]["locked"])
+        # Product rule: first two lessons are free preview access.
+        self.assertFalse(lesson_map[self.lesson2.id]["locked"])
 
     def test_unlock_next_lesson_after_pass(self):
         self.auth_as_student()
@@ -359,7 +374,7 @@ class CoreApiFlowTests(APITransactionTestCase):
         qid = exam_payload.data["questions"][0]["id"]
         wrong_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=False).id
 
-        for _ in range(3):
+        for attempt_idx in range(3):
             failed = self.client.post(
                 f"/api/courses/{self.course.id}/final-exam/submit/",
                 {"answers": [{"question_id": qid, "choice_id": wrong_choice}]},
@@ -367,9 +382,12 @@ class CoreApiFlowTests(APITransactionTestCase):
             )
             self.assertEqual(failed.status_code, 201)
             self.assertFalse(failed.data["passed"])
-            exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
-            qid = exam_payload.data["questions"][0]["id"]
-            wrong_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=False).id
+            # Refresh active exam session only while retry fee is not yet enforced.
+            if attempt_idx < 2:
+                exam_payload = self.client.get(f"/api/courses/{self.course.id}/final-exam/")
+                self.assertEqual(exam_payload.status_code, 200)
+                qid = exam_payload.data["questions"][0]["id"]
+                wrong_choice = FinalExamChoice.objects.get(question_id=qid, is_correct=False).id
 
         blocked = self.client.post(
             f"/api/courses/{self.course.id}/final-exam/submit/",
@@ -514,3 +532,215 @@ class CoreApiFlowTests(APITransactionTestCase):
         detail = self.client.get(f"/api/admin/students/{self.student.id}/wallet/")
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.data["student"]["id"], self.student.id)
+
+    def test_schedule_edges_course_visibility_and_access(self):
+        future_course = Course.objects.create(
+            title="Future Course",
+            description="Not yet live",
+            slug="future-course-test",
+            level="Beginner",
+            is_published=True,
+            publish_at=timezone.now() + timedelta(hours=2),
+        )
+        expired_course = Course.objects.create(
+            title="Expired Course",
+            description="Already unpublished",
+            slug="expired-course-test",
+            level="Beginner",
+            is_published=True,
+            unpublish_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        listed = self.client.get("/api/courses/")
+        self.assertEqual(listed.status_code, 200)
+        listed_ids = {row["id"] for row in listed.data}
+        self.assertIn(self.course.id, listed_ids)
+        self.assertNotIn(future_course.id, listed_ids)
+        self.assertNotIn(expired_course.id, listed_ids)
+
+        hidden_detail = self.client.get(f"/api/courses/{future_course.slug}/")
+        self.assertEqual(hidden_detail.status_code, 404)
+        hidden_access = self.client.get(f"/api/courses/{expired_course.id}/access/")
+        self.assertEqual(hidden_access.status_code, 404)
+
+    @override_settings(
+        AUTH_LOGIN_USER_RATE_LIMIT=2,
+        AUTH_LOGIN_USER_RATE_WINDOW_SECONDS=3600,
+        AUTH_LOGIN_USER_RATE_LOCK_SECONDS=300,
+        AUTH_LOGIN_IP_RATE_LIMIT=999,
+    )
+    def test_auth_login_lockout_flow(self):
+        for _ in range(2):
+            bad = self.client.post(
+                "/api/auth/login/",
+                {"username": "student_test", "password": "wrong-pass"},
+                format="json",
+            )
+            self.assertEqual(bad.status_code, 401)
+
+        locked = self.client.post(
+            "/api/auth/login/",
+            {"username": "student_test", "password": "wrong-pass"},
+            format="json",
+        )
+        self.assertEqual(locked.status_code, 429)
+        self.assertIn("retry_after_seconds", locked.data)
+
+    @override_settings(
+        EXAM_SUBMIT_RATE_LIMIT=2,
+        EXAM_SUBMIT_RATE_WINDOW_SECONDS=3600,
+        EXAM_SUBMIT_RATE_LOCK_SECONDS=300,
+    )
+    def test_final_exam_submit_lockout_flow(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {"answers": [{"question_id": 1, "choice_id": 1}]},
+            format="json",
+        )
+        self.client.post(
+            f"/api/lessons/{self.lesson3.id}/progress/",
+            {"last_position_seconds": 180, "completed": True},
+            format="json",
+        )
+
+        for _ in range(2):
+            submitted = self.client.post(
+                f"/api/courses/{self.course.id}/final-exam/submit/",
+                {"answers": []},
+                format="json",
+            )
+            self.assertEqual(submitted.status_code, 201)
+
+        locked = self.client.post(
+            f"/api/courses/{self.course.id}/final-exam/submit/",
+            {"answers": []},
+            format="json",
+        )
+        self.assertEqual(locked.status_code, 429)
+        self.assertIn("retry_after_seconds", locked.data)
+
+    def test_paid_enrollment_credit_race_charges_once(self):
+        wallet, _ = CreditWallet.objects.get_or_create(user=self.student, defaults={"balance_credits": 0})
+        wallet.balance_credits = 100
+        wallet.save(update_fields=["balance_credits", "updated_at"])
+
+        login = self.client.post(
+            "/api/auth/login/",
+            {"username": "student_test", "password": "student12345"},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        token = login.data["access"]
+
+        barrier = threading.Barrier(2)
+        responses = []
+
+        def enroll_once():
+            local_client = APIClient()
+            local_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+            barrier.wait(timeout=5)
+            res = local_client.post(f"/api/courses/{self.paid_course.id}/enroll/", {}, format="json")
+            responses.append(res.status_code)
+
+        t1 = threading.Thread(target=enroll_once)
+        t2 = threading.Thread(target=enroll_once)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(sorted(responses), [200, 201])
+        self.assertEqual(Enrollment.objects.filter(user=self.student, course=self.paid_course).count(), 1)
+        self.assertEqual(
+            CreditTransaction.objects.filter(user=self.student, course=self.paid_course).count(),
+            1,
+        )
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.balance_credits, 50)
+
+    def test_quiz_submit_rejects_tampered_session_token(self):
+        self.auth_as_student()
+        self.client.post(f"/api/courses/{self.course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{self.lesson1.id}/progress/",
+            {"last_position_seconds": 120, "completed": True},
+            format="json",
+        )
+        quiz_payload = self.client.get(f"/api/lessons/{self.lesson2.id}/quiz/")
+        self.assertEqual(quiz_payload.status_code, 200)
+        question = quiz_payload.data["questions"][0]
+        choice = question["choices"][0]
+
+        tampered = self.client.post(
+            f"/api/quizzes/{self.lesson2.id}/submit/",
+            {
+                "session_token": f"{quiz_payload.data['session_token']}tampered",
+                "answers": [{"question_id": question["id"], "choice_id": choice["id"]}],
+            },
+            format="json",
+        )
+        self.assertEqual(tampered.status_code, 400)
+        self.assertIn("session", str(tampered.data.get("detail", "")).lower())
+
+    def test_final_exam_submit_rejects_question_outside_active_session(self):
+        self.auth_as_student()
+        course = Course.objects.create(
+            title="Exam Session Guard Course",
+            description="Session guard",
+            slug="exam-session-guard-course",
+            level="Intermediate",
+            is_published=True,
+        )
+        lesson = Lesson.objects.create(
+            course=course,
+            section_title="Start",
+            section_order=1,
+            title="Lesson 1",
+            order=1,
+            is_preview=False,
+            duration_seconds=60,
+        )
+        exam = FinalExam.objects.create(
+            course=course,
+            title="Guarded Exam",
+            passing_score=60,
+            is_published=True,
+        )
+        for idx in range(1, 7):
+            question = FinalExamQuestion.objects.create(exam=exam, prompt=f"GQ{idx}", order=idx)
+            FinalExamChoice.objects.create(question=question, text="A", is_correct=True, order=1)
+            FinalExamChoice.objects.create(question=question, text="B", is_correct=False, order=2)
+
+        self.client.post(f"/api/courses/{course.id}/enroll/", {}, format="json")
+        self.client.post(
+            f"/api/lessons/{lesson.id}/progress/",
+            {"last_position_seconds": 60, "completed": True},
+            format="json",
+        )
+
+        exam_payload = self.client.get(f"/api/courses/{course.id}/final-exam/")
+        self.assertEqual(exam_payload.status_code, 200)
+        active_question_ids = {row["id"] for row in exam_payload.data["questions"]}
+        self.assertEqual(len(active_question_ids), 5)
+
+        outside_question = (
+            FinalExamQuestion.objects.filter(exam=exam).exclude(id__in=active_question_ids).order_by("id").first()
+        )
+        self.assertIsNotNone(outside_question)
+        outside_choice = FinalExamChoice.objects.filter(question=outside_question).order_by("id").first()
+
+        invalid = self.client.post(
+            f"/api/courses/{course.id}/final-exam/submit/",
+            {"answers": [{"question_id": outside_question.id, "choice_id": outside_choice.id}]},
+            format="json",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("not part of this exam", str(invalid.data.get("detail", "")).lower())
